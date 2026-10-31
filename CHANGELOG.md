@@ -56,6 +56,9 @@
   excerpt size, location (now lowercase ISO alpha-2) and source policy go under
   `advanced_settings`, as v1 requires; results now carry `publish_date`.
   `search stats` estimates $0.001 per call (fast mode), down from $0.005.
+- Browserless: `/content` runs with `stealth=true` and `bestAttempt`, so the
+  rung uses Browserless's bot-detection mode and returns partial renders
+  instead of failing on a selector timeout.
 
 ## 0.10.0 — 2026-10-31
 

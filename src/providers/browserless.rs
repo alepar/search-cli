@@ -18,7 +18,7 @@ impl Browserless {
         super::resolve_key(&self.ctx.config.keys.browserless, "BROWSERLESS_API_KEY")
     }
 
-    /// Scrape a URL using Browserless cloud browser (handles Cloudflare, JS rendering)
+    /// Scrape a URL with Browserless's cloud browser (JS rendering, stealth mode)
     pub async fn scrape_url(&self, url: &str) -> Result<Vec<SearchResult>, SearchError> {
         if self.api_key().is_empty() {
             return Err(SearchError::AuthMissing {
@@ -26,11 +26,16 @@ impl Browserless {
             });
         }
 
-        let endpoint = "https://production-sfo.browserless.io/content";
+        // stealth=true: Browserless's managed stealth browser, the documented
+        // first step against bot detection (no extra units). bestAttempt:
+        // return what rendered if the selector wait times out, rather than
+        // failing the whole rung.
+        let endpoint = "https://production-sfo.browserless.io/content?stealth=true";
 
         let body = serde_json::json!({
             "url": url,
-            "waitForSelector": { "selector": "body", "timeout": 10000 }
+            "waitForSelector": { "selector": "body", "timeout": 10000 },
+            "bestAttempt": true
         });
 
         let client = &self.ctx.client;
