@@ -6,8 +6,10 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Google returns at most 100 results per page.
-pub(super) const MAX_COUNT: usize = 100;
+/// Serper returns one Google page (10 results) per request. A larger `num`
+/// is echoed but ignored on web search, and on news num=30 returns an empty
+/// list with no error (checked live 2026-10-31).
+pub(super) const MAX_COUNT: usize = 10;
 
 pub struct Serper {
     ctx: Arc<AppContext>,

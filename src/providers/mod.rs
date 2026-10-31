@@ -284,7 +284,7 @@ mod tests {
         assert_eq!(super::brave::NEWS_MAX_COUNT, 50);
         assert_eq!(super::brave::LLM_CONTEXT_MAX_COUNT, 50);
         assert_eq!(super::jina::MAX_COUNT, 20);
-        assert_eq!(super::serper::MAX_COUNT, 100);
+        assert_eq!(super::serper::MAX_COUNT, 10);
         assert_eq!(super::serpapi::max_count("google_scholar"), 20);
         assert_eq!(super::serpapi::max_count("google"), 100);
         assert_eq!(super::exa::MAX_COUNT, 100);
