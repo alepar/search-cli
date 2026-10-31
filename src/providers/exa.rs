@@ -196,3 +196,39 @@ impl Exa {
         Ok(to_results(resp, "exa_similar"))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn highlights_preferred_over_text() {
+        let resp: ExaResponse = serde_json::from_value(json!({"results": [
+            {"title": "a", "url": "https://a.com", "text": "full", "highlights": ["h1", "h2"],
+             "publishedDate": "2026-10-01T00:00:00.000Z"},
+            {"title": "b", "url": "https://b.com", "text": "full b", "highlights": []}
+        ]}))
+        .unwrap();
+        let r = to_results(resp, "exa");
+        assert_eq!(r[0].snippet, "h1 ... h2");
+        assert_eq!(r[0].published.as_deref(), Some("2026-10-01T00:00:00.000Z"));
+        assert_eq!(r[1].snippet, "full b");
+    }
+
+    #[test]
+    fn search_body_filters() {
+        let opts = SearchOpts {
+            include_domains: vec!["arxiv.org".into()],
+            freshness: Some("week".into()),
+            ..SearchOpts::default()
+        };
+        let body = build_search_body("rust", 5, &opts);
+        assert_eq!(body["numResults"], 5);
+        assert_eq!(body["includeDomains"], json!(["arxiv.org"]));
+        let start = body["startPublishedDate"].as_str().unwrap();
+        assert!(
+            start.ends_with("T00:00:00Z") && start.len() == 20,
+            "{start}"
+        );
+    }
+}

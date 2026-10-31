@@ -65,6 +65,9 @@
   were searched as literal text and leading ones were rejected. `search search`
   also takes the query as bare words; a word starting with `-` needs `--`
   first.
+- Serper places results get a URL (the business website, else a Google Maps
+  link from the place's `cid`) and the address as the snippet; places items
+  carry no `link`.
 
 ## 0.10.0 — 2026-10-31
 

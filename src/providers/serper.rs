@@ -109,14 +109,20 @@ fn parse_organic(body: &serde_json::Value, source: &str) -> Vec<SearchResult> {
                         .and_then(|v| v.as_str())
                         .unwrap_or_default()
                         .to_string();
-                    let url = item
-                        .get("link")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string();
-                    let snippet = item
-                        .get("snippet")
-                        .and_then(|v| v.as_str())
+                    let str_field = |k: &str| item.get(k).and_then(|v| v.as_str());
+                    // Places carry `website` (often absent) and a `cid`
+                    // instead of `link`, and an address instead of a snippet.
+                    let url = str_field("link")
+                        .or_else(|| str_field("website"))
+                        .map(String::from)
+                        .or_else(|| {
+                            item.get("cid")
+                                .and_then(|v| v.as_str())
+                                .map(|cid| format!("https://maps.google.com/?cid={cid}"))
+                        })
+                        .unwrap_or_default();
+                    let snippet = str_field("snippet")
+                        .or_else(|| str_field("address"))
                         .unwrap_or_default()
                         .to_string();
                     let published = item.get("date").and_then(|v| v.as_str()).map(String::from);
@@ -218,5 +224,51 @@ impl Serper {
             .query_endpoint(endpoint, query, count, &SearchOpts::default())
             .await?;
         Ok(parse_organic(&body, &format!("serper_{endpoint}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_organic;
+    use serde_json::json;
+
+    #[test]
+    fn organic_results() {
+        let body = json!({"organic": [{"title": "Rust", "link": "https://rust-lang.org",
+            "snippet": "A language", "date": "Oct 30, 2026"}]});
+        let r = parse_organic(&body, "serper");
+        assert_eq!(
+            (r[0].url.as_str(), r[0].snippet.as_str()),
+            ("https://rust-lang.org", "A language")
+        );
+        assert_eq!(r[0].published.as_deref(), Some("Oct 30, 2026"));
+    }
+
+    #[test]
+    fn news_and_images_use_their_own_keys() {
+        let body = json!({"news": [{"title": "n", "link": "https://n.com", "imageUrl": "https://n.com/i.jpg"}],
+            "images": [{"title": "i", "link": "https://i.com", "imageUrl": "https://i.com/x.png"}]});
+        assert_eq!(
+            parse_organic(&body, "serper_news")[0].image_url.as_deref(),
+            Some("https://n.com/i.jpg")
+        );
+        assert_eq!(
+            parse_organic(&body, "serper_images")[0].url,
+            "https://i.com"
+        );
+    }
+
+    #[test]
+    fn places_fall_back_to_website_then_maps_cid() {
+        let body = json!({"places": [
+            {"title": "Cafe", "address": "1 Main St", "website": "https://cafe.example", "cid": "123"},
+            {"title": "Bar", "address": "2 Main St", "cid": "456"}
+        ]});
+        let r = parse_organic(&body, "serper_places");
+        assert_eq!(
+            (r[0].url.as_str(), r[0].snippet.as_str()),
+            ("https://cafe.example", "1 Main St")
+        );
+        assert_eq!(r[1].url, "https://maps.google.com/?cid=456");
     }
 }
