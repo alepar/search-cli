@@ -1078,25 +1078,32 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                         .current_version(current)
                         .build()
                         .and_then(|u| u.get_latest_release())
+                        // The github backend errors on an empty listing, so latest()
+                        // is always Some here.
+                        .map(|releases| {
+                            releases
+                                .latest()
+                                .map_or_else(|| current.to_string(), |r| r.version().to_string())
+                        })
                 })
                 .await
                 .map_err(|e| errors::SearchError::Config(format!("update task failed: {e}")))?;
 
                 match res {
-                    Ok(release) => {
-                        let up_to_date = release.version == current;
+                    Ok(latest) => {
+                        let up_to_date = latest == current;
                         if ctx.is_json() {
                             output::json::render_value(&serde_json::json!({
                                 "version": types::ENVELOPE_VERSION,
                                 "status": "success",
                                 "current_version": current,
-                                "latest_version": release.version,
+                                "latest_version": latest,
                                 "update_available": !up_to_date,
                             }));
                         } else if !ctx.suppress_human() {
                             if !up_to_date {
                                 eprintln!("Current version: {current}");
-                                eprintln!("New version available: {}", release.version);
+                                eprintln!("New version available: {latest}");
                                 eprintln!("Run `search update` to install");
                             } else {
                                 eprintln!("Already up to date (v{current})");
@@ -1123,24 +1130,27 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 if !ctx.suppress_human() {
                     eprintln!("Updating search from v{current}...");
                 }
+                // `search update` is the confirmation: an interactive prompt
+                // would abort every non-TTY (agent) run. Progress text goes
+                // to stdout, so keep it out of JSON output.
+                let show_output = !ctx.is_json() && !ctx.suppress_human();
                 let res = tokio::task::spawn_blocking(
                     move || -> Result<_, self_update::errors::Error> {
-                        // self_update's default .update() can resolve to the wrong
-                        // (older) release when several are newer than current. Pin
-                        // it to the actual latest tag (get_latest_release is correct).
-                        let latest = self_update::backends::github::Update::configure()
-                            .repo_owner("alepar")
-                            .repo_name("search-cli")
-                            .bin_name("search")
-                            .current_version(current)
-                            .build()?
-                            .get_latest_release()?;
+                        // Latest, not the default Compatible: on 0.x every minor
+                        // release is semver-incompatible, and Compatible would stop
+                        // at the newest patch of the current minor. The release's
+                        // SHA256SUMS (also used by install.sh) must match the
+                        // downloaded archive before anything is installed.
                         self_update::backends::github::Update::configure()
                             .repo_owner("alepar")
                             .repo_name("search-cli")
                             .bin_name("search")
                             .current_version(current)
-                            .target_version_tag(&format!("v{}", latest.version))
+                            .update_strategy(self_update::UpdateStrategy::Latest)
+                            .checksum_from_asset("SHA256SUMS")
+                            .no_confirm(true)
+                            .show_output(show_output)
+                            .show_download_progress(show_output)
                             .build()?
                             .update()
                     },
@@ -1154,11 +1164,11 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                             output::json::render_value(&serde_json::json!({
                                 "version": types::ENVELOPE_VERSION,
                                 "status": "success",
-                                "updated": status.updated(),
+                                "updated": status.is_updated(),
                                 "version_installed": status.version(),
                             }));
                         } else if !ctx.suppress_human() {
-                            if status.updated() {
+                            if status.is_updated() {
                                 eprintln!("Updated to v{}", status.version());
                             } else {
                                 eprintln!("Already up to date (v{current})");
