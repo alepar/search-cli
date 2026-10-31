@@ -1,3 +1,4 @@
+use crate::config::AppConfig;
 use crate::context::AppContext;
 use crate::errors::SearchError;
 use crate::types::{SearchOpts, SearchResult};
@@ -6,6 +7,24 @@ use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Default model for X search. grok-4-1-fast was retired 2026-05-15 and its
+/// slug now redirects here; grok-4.3 is also the cheapest current tier with
+/// server-side tool support. Override with `xai.model` / `SEARCH_XAI_MODEL`.
+pub const DEFAULT_MODEL: &str = "grok-4.3";
+
+/// x_search accepts at most this many handles in either filter list.
+const MAX_X_HANDLES: usize = 20;
+
+/// The model to call: `[xai] model` from config, else [`DEFAULT_MODEL`].
+pub fn model(config: &AppConfig) -> &str {
+    let m = config.xai.model.trim();
+    if m.is_empty() {
+        DEFAULT_MODEL
+    } else {
+        m
+    }
+}
 
 pub struct Xai {
     ctx: Arc<AppContext>,
@@ -42,7 +61,7 @@ impl Xai {
         }
 
         let body = json!({
-            "model": "grok-4-1-fast",
+            "model": model(&self.ctx.config),
             "input": [{"role": "user", "content": prompt}],
             "tools": [x_search_tool],
             "store": false,
@@ -85,68 +104,71 @@ impl Xai {
         })
         .await
     }
+}
 
-    fn build_x_search_config(&self, opts: &SearchOpts) -> Option<serde_json::Value> {
-        let mut config = serde_json::Map::new();
+fn build_x_search_config(opts: &SearchOpts) -> Option<serde_json::Value> {
+    let mut config = serde_json::Map::new();
 
-        // Map include_domains to allowed_x_handles
-        if !opts.include_domains.is_empty() {
-            config.insert("allowed_x_handles".to_string(), json!(opts.include_domains));
-        }
+    // -d/--exclude-domain carry X handles here. x_search rejects requests
+    // that set both lists, so an allow-list wins: it already excludes every
+    // handle not on it.
+    let allowed = x_handles(&opts.include_domains);
+    let excluded = x_handles(&opts.exclude_domains);
+    if !allowed.is_empty() {
+        config.insert("allowed_x_handles".to_string(), json!(allowed));
+    } else if !excluded.is_empty() {
+        config.insert("excluded_x_handles".to_string(), json!(excluded));
+    }
 
-        // Map exclude_domains to excluded_x_handles
-        if !opts.exclude_domains.is_empty() {
-            config.insert(
-                "excluded_x_handles".to_string(),
-                json!(opts.exclude_domains),
-            );
-        }
+    if let Some(days_back) = opts.freshness.as_deref().and_then(freshness_days) {
+        let (from, to) = date_range(today_epoch_days(), days_back);
+        config.insert("from_date".to_string(), json!(from));
+        config.insert("to_date".to_string(), json!(to));
+    }
 
-        // Convert freshness to date range
-        if let Some(ref freshness) = opts.freshness {
-            let now = chrono_today();
-            let from = match freshness.as_str() {
-                "day" => subtract_days(&now, 1),
-                "week" => subtract_days(&now, 7),
-                "month" => subtract_days(&now, 30),
-                "year" => subtract_days(&now, 365),
-                _ => None,
-            };
-            if let Some(from_date) = from {
-                config.insert("from_date".to_string(), json!(from_date));
-                config.insert("to_date".to_string(), json!(now));
-            }
-        }
-
-        if config.is_empty() {
-            None
-        } else {
-            Some(serde_json::Value::Object(config))
-        }
+    if config.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(config))
     }
 }
 
-fn chrono_today() -> String {
-    // Simple date without pulling in chrono: use system time
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let days = now / 86400;
-    // Convert days since epoch to YYYY-MM-DD
-    epoch_days_to_date(days)
+/// Handles go to x_search without the leading `@`, deduplicated and capped
+/// at the API maximum.
+fn x_handles(raw: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    raw.iter()
+        .map(|h| h.trim().trim_start_matches('@').to_string())
+        .filter(|h| !h.is_empty() && seen.insert(h.to_ascii_lowercase()))
+        .take(MAX_X_HANDLES)
+        .collect()
 }
 
-fn subtract_days(today: &str, days: u64) -> Option<String> {
-    // Parse YYYY-MM-DD back to epoch days, subtract, convert back
-    let now = std::time::SystemTime::now()
+fn freshness_days(freshness: &str) -> Option<u64> {
+    match freshness {
+        "day" => Some(1),
+        "week" => Some(7),
+        "month" => Some(30),
+        "year" => Some(365),
+        _ => None,
+    }
+}
+
+fn today_epoch_days() -> u64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
-    let target = now.saturating_sub(days * 86400);
-    let target_days = target / 86400;
-    let _ = today; // we recalculate from epoch
-    Some(epoch_days_to_date(target_days))
+        .as_secs()
+        / 86400
+}
+
+/// x_search dates are UTC `YYYY-MM-DD` and `to_date` is exclusive, so the
+/// range ends tomorrow — ending it today would drop today's posts.
+fn date_range(today: u64, days_back: u64) -> (String, String) {
+    (
+        epoch_days_to_date(today.saturating_sub(days_back)),
+        epoch_days_to_date(today + 1),
+    )
 }
 
 fn epoch_days_to_date(total_days: u64) -> String {
@@ -283,7 +305,7 @@ impl super::Provider for Xai {
              Format as a clear summary."
         );
 
-        let x_config = self.build_x_search_config(opts);
+        let x_config = build_x_search_config(opts);
         let resp = self.call_responses_api(&prompt, x_config).await?;
 
         let mut results = Vec::new();
@@ -331,5 +353,167 @@ impl super::Provider for Xai {
     ) -> Result<Vec<SearchResult>, SearchError> {
         // X is inherently news-like; delegate to search
         self.search(query, count, opts).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(json: &str) -> XaiResponse {
+        // Same parser as the live path.
+        let mut bytes = json.as_bytes().to_vec();
+        simd_json::from_slice(&mut bytes).expect("fixture parses")
+    }
+
+    fn opts(include: &[&str], exclude: &[&str], freshness: Option<&str>) -> SearchOpts {
+        SearchOpts {
+            include_domains: include.iter().map(|s| s.to_string()).collect(),
+            exclude_domains: exclude.iter().map(|s| s.to_string()).collect(),
+            freshness: freshness.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    // Shape per the xAI Responses API docs (tools/x-search, tools/citations):
+    // reasoning and custom_tool_call items precede the message; inline
+    // citations arrive as url_citation annotations on output_text, with the
+    // visible citation number in `title`; a top-level `citations` list holds
+    // every source seen, cited or not.
+    const RESPONSE_FIXTURE: &str = r#"{
+        "id": "resp_123",
+        "object": "response",
+        "model": "grok-4.3",
+        "status": "completed",
+        "output": [
+            {"type": "reasoning", "id": "rs_1", "summary": []},
+            {
+                "type": "custom_tool_call",
+                "id": "ctc_1",
+                "call_id": "call_1",
+                "name": "x_keyword_search",
+                "input": "{\"query\":\"rust 2.0\",\"limit\":10}",
+                "status": "completed"
+            },
+            {
+                "type": "message",
+                "id": "msg_1",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "@rustlang announced it [[1]](https://x.com/rustlang/status/1). Others agreed [[2]](https://x.com/jdoe/status/2) [[1]](https://x.com/rustlang/status/1).",
+                        "logprobs": [],
+                        "annotations": [
+                            {"type": "url_citation", "url": "https://x.com/rustlang/status/1", "start_index": 23, "end_index": 59, "title": "1"},
+                            {"type": "url_citation", "url": "https://x.com/jdoe/status/2", "start_index": 76, "end_index": 108, "title": "2"},
+                            {"type": "url_citation", "url": "https://x.com/rustlang/status/1", "start_index": 109, "end_index": 145, "title": "1"}
+                        ]
+                    }
+                ]
+            }
+        ],
+        "citations": [
+            "https://x.com/rustlang/status/1",
+            "https://x.com/jdoe/status/2",
+            "https://x.com/unrelated/status/3"
+        ],
+        "usage": {
+            "input_tokens": 5120,
+            "output_tokens": 410,
+            "server_side_tool_usage_details": {"x_search_calls": 1, "x_posts_fetched": 10, "x_users_fetched": 0}
+        }
+    }"#;
+
+    #[test]
+    fn extracts_message_text_only() {
+        let text = extract_text(&parse(RESPONSE_FIXTURE));
+        assert!(text.starts_with("@rustlang announced it"));
+        assert!(!text.contains("x_keyword_search"));
+    }
+
+    #[test]
+    fn citations_come_from_annotations_deduplicated_in_order() {
+        assert_eq!(
+            extract_citations(&parse(RESPONSE_FIXTURE)),
+            vec![
+                "https://x.com/rustlang/status/1",
+                "https://x.com/jdoe/status/2"
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_and_minimal_responses_parse() {
+        let resp = parse(r#"{"output": []}"#);
+        assert!(extract_text(&resp).is_empty());
+        assert!(extract_citations(&resp).is_empty());
+        let resp = parse(r#"{"id": "resp_1"}"#);
+        assert!(extract_text(&resp).is_empty());
+    }
+
+    #[test]
+    fn no_filters_means_no_tool_config() {
+        assert!(build_x_search_config(&opts(&[], &[], None)).is_none());
+    }
+
+    #[test]
+    fn handle_lists_are_mutually_exclusive() {
+        let cfg = build_x_search_config(&opts(&["rustlang"], &["spam"], None)).unwrap();
+        assert_eq!(cfg["allowed_x_handles"], json!(["rustlang"]));
+        assert!(cfg.get("excluded_x_handles").is_none());
+
+        let cfg = build_x_search_config(&opts(&[], &["spam"], None)).unwrap();
+        assert_eq!(cfg["excluded_x_handles"], json!(["spam"]));
+        assert!(cfg.get("allowed_x_handles").is_none());
+    }
+
+    #[test]
+    fn handles_are_normalized_and_capped() {
+        let raw: Vec<String> = (0..25).map(|i| format!("@user{i}")).collect();
+        let handles = x_handles(&raw);
+        assert_eq!(handles.len(), MAX_X_HANDLES);
+        assert_eq!(handles[0], "user0");
+
+        let raw = vec![
+            " @RustLang ".to_string(),
+            "rustlang".to_string(),
+            "@".to_string(),
+            "jdoe".to_string(),
+        ];
+        assert_eq!(x_handles(&raw), vec!["RustLang", "jdoe"]);
+    }
+
+    #[test]
+    fn date_range_end_is_exclusive_tomorrow() {
+        // 2026-10-31 is epoch day 20757.
+        assert_eq!(epoch_days_to_date(20757), "2026-10-31");
+        assert_eq!(
+            date_range(20757, 1),
+            ("2026-10-30".to_string(), "2026-11-01".to_string())
+        );
+        assert_eq!(
+            date_range(20757, 7),
+            ("2026-10-24".to_string(), "2026-11-01".to_string())
+        );
+    }
+
+    #[test]
+    fn freshness_maps_to_date_window() {
+        let cfg = build_x_search_config(&opts(&[], &[], Some("week"))).unwrap();
+        assert!(cfg["from_date"].is_string());
+        assert!(cfg["to_date"].is_string());
+        assert!(build_x_search_config(&opts(&[], &[], Some("bogus"))).is_none());
+    }
+
+    #[test]
+    fn model_defaults_and_overrides() {
+        let mut config = AppConfig::default();
+        assert_eq!(model(&config), DEFAULT_MODEL);
+        config.xai.model = "  ".to_string();
+        assert_eq!(model(&config), DEFAULT_MODEL);
+        config.xai.model = "grok-4.7".to_string();
+        assert_eq!(model(&config), "grok-4.7");
     }
 }

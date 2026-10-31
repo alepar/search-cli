@@ -228,7 +228,10 @@ pub fn filter_support(provider: &str) -> FilterSupport {
         "xai" => FilterSupport {
             freshness: true,
             domains: true,
-            note: Some("xai maps --domain/--exclude-domain to X handles, not web domains"),
+            note: Some(
+                "xai maps --domain/--exclude-domain to X handles, not web domains \
+                 (max 20; --domain wins if both are given)",
+            ),
         },
         _ => FilterSupport {
             freshness: false,

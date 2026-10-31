@@ -15,6 +15,16 @@ pub struct AppConfig {
     /// per-provider keys above: either, both, or neither may be set.
     #[serde(default)]
     pub metasearch: Metasearch,
+    #[serde(default)]
+    pub xai: XaiConfig,
+}
+
+/// `[xai]` section. xAI retires model slugs on a schedule, so the model is
+/// overridable without a release. Empty = the provider's built-in default.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct XaiConfig {
+    #[serde(default)]
+    pub model: String,
 }
 
 /// Field names deliberately avoid underscores — figment splits `SEARCH_*` env
@@ -101,6 +111,7 @@ impl Default for AppConfig {
                 count: default_count(),
             },
             metasearch: Metasearch::default(),
+            xai: XaiConfig::default(),
         }
     }
 }
@@ -168,6 +179,9 @@ pub const SETTING_KEYS: &[&str] = &["timeout", "count"];
 
 /// Valid field names for `config set metasearch.<name>`.
 pub const METASEARCH_KEYS: &[&str] = &["token", "email", "url"];
+
+/// Valid field names for `config set xai.<name>`.
+pub const XAI_KEYS: &[&str] = &["model"];
 
 pub fn mask_key(key: &str) -> String {
     // Char-based: byte-slicing (`&key[..2]`) panics on multi-byte UTF-8 and
@@ -266,6 +280,16 @@ pub fn config_show(config: &AppConfig) {
     }
 
     println!();
+    let xai_model = crate::providers::xai::model(config);
+    if c {
+        println!("  {}", "[xai]".bold());
+        println!("    {:<10} {}", "model".white(), xai_model.cyan());
+    } else {
+        println!("[xai]");
+        println!("  model    = {xai_model}");
+    }
+
+    println!();
     let token = crate::auth::resolve_token(config);
     let host = crate::auth::resolve_base_url(config);
     if c {
@@ -340,9 +364,18 @@ pub fn config_set(key: &str, value: &str) -> Result<(), crate::errors::SearchErr
                     }
                     toml::Value::String(value.to_string())
                 }
+                "xai" => {
+                    if !XAI_KEYS.contains(name) {
+                        return Err(SearchError::Config(format!(
+                            "Unknown field 'xai.{name}'. Valid: {}",
+                            XAI_KEYS.join(", ")
+                        )));
+                    }
+                    toml::Value::String(value.to_string())
+                }
                 other => {
                     return Err(SearchError::Config(format!(
-                        "Unknown section '{other}'. Use 'keys.<provider>', 'settings.<name>', or 'metasearch.<name>'."
+                        "Unknown section '{other}'. Use 'keys.<provider>', 'settings.<name>', 'metasearch.<name>', or 'xai.<name>'."
                     )));
                 }
             };

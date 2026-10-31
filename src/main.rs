@@ -561,6 +561,9 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                                 "email": app.config.metasearch.email,
                                 "url": auth::resolve_base_url(&app.config),
                             },
+                            "xai": {
+                                "model": providers::xai::model(&app.config),
+                            },
                         });
                         output::json::render_value(&info);
                     } else if !ctx.suppress_human() {
@@ -725,7 +728,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                     "config set": {
                         "description": "Set a configuration value",
                         "args": [
-                            {"name": "key", "type": "string", "required": true, "description": "Config key (e.g. keys.brave, settings.timeout)"},
+                            {"name": "key", "type": "string", "required": true, "description": "Config key (e.g. keys.brave, settings.timeout, xai.model)"},
                             {"name": "value", "type": "string", "required": true, "description": "Value to set"},
                         ],
                         "options": []

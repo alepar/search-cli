@@ -24,7 +24,9 @@ fn estimated_cost_per_call(provider: &str) -> f64 {
         "serpapi" => 0.010,
         "perplexity" => 0.012,
         "browserless" => 0.004,
-        "xai" => 0.05,
+        // grok-4.3 tokens (~$0.02) plus X Search at $5 per 1k posts fetched
+        // (~10-20 posts per call); xAI pricing as of 2026-09.
+        "xai" => 0.08,
         _ => 0.0, // stealth and unknowns
     }
 }
