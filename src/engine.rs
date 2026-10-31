@@ -6,6 +6,7 @@ use crate::types::{
     Answer, FailureCategory, Mode, ProviderFailure, ResponseMetadata, ResponseStatus, SearchOpts,
     SearchResponse, SearchResult, ENVELOPE_VERSION,
 };
+use crate::walls;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -459,10 +460,10 @@ pub async fn execute_special(
         }
         Mode::Scrape | Mode::Extract => {
             // Try Stealth (local) first, then Jina reader, Firecrawl, Browserless.
-            // After each attempt, garbage output (binary bytes, anti-bot
-            // challenge pages) is demoted to a failure so the chain keeps
-            // escalating — a scraper "succeeding" with a Cloudflare
-            // interstitial must not stop the fallback.
+            // After each attempt, walls (binary bytes, anti-bot challenges,
+            // login walls, empty JS shells) are demoted to a failure so the
+            // chain keeps escalating: a scraper "succeeding" with a login
+            // form must not stop the fallback.
             #[cfg(feature = "stealth")]
             {
                 let stealth = providers::stealth::Stealth::new(ctx.clone());
@@ -504,13 +505,19 @@ pub async fn execute_special(
                     );
                 }
             }
-            // Last resort: Browserless cloud browser (handles Cloudflare, JS
-            // rendering). Its output is NOT rejected — after the last rung
-            // there is nothing to escalate to, so imperfect content beats none.
+            // Last resort: Browserless cloud browser (JS rendering). A wall
+            // from it is still reported as a wall: a login form is not the page.
             if results.is_empty() {
                 let bl = providers::browserless::Browserless::new(ctx.clone());
                 if bl.is_configured() && provider_allowed("browserless", only_providers) {
                     query_provider!("browserless", bl.scrape_url(query), 30);
+                    reject_bad_scrape(
+                        "browserless",
+                        &mut results,
+                        &mut providers_failed,
+                        &mut provider_failures,
+                        &mut provider_results,
+                    );
                 }
             }
         }
@@ -639,40 +646,10 @@ fn no_providers_error(mode: Mode, only_providers: &Option<Vec<String>>) -> Searc
     }
 }
 
-/// Why scraped content is unusable, or None if it looks like real page text.
-/// Two failure classes seen in the wild: undecompressed/binary bytes served
-/// as text (mojibake), and anti-bot challenge pages returned with HTTP 200.
-fn scrape_rejection(content: &str) -> Option<&'static str> {
-    let sample: Vec<char> = content.chars().take(4000).collect();
-    if sample.len() > 200 {
-        let garbage = sample
-            .iter()
-            .filter(|c| **c == '\u{FFFD}' || (c.is_control() && !c.is_whitespace()))
-            .count();
-        if garbage * 20 > sample.len() {
-            return Some("binary or undecodable content");
-        }
-    }
-    // Challenge pages are short; a real article mentioning Cloudflare isn't.
-    if content.chars().count() < 4000 {
-        const CHALLENGE_MARKERS: &[&str] = &[
-            "Checking your browser before accessing",
-            "Just a moment...",
-            "Verifying you are human",
-            "Enable JavaScript and cookies to continue",
-            "cf-browser-verification",
-            "Attention Required! | Cloudflare",
-        ];
-        if CHALLENGE_MARKERS.iter().any(|m| content.contains(m)) {
-            return Some("anti-bot challenge page instead of content");
-        }
-    }
-    None
-}
-
-/// Demote a scrape "success" whose content is garbage to a structured failure
-/// and clear `results`, so the extract/scrape chain escalates to the next
-/// provider instead of returning junk as success.
+/// Drop scrape "successes" that are walls (bot challenges, login walls, empty
+/// JS shells, binary garbage) rather than content. If nothing usable is left,
+/// record a structured failure so the extract chain escalates to the next
+/// provider instead of returning a wall as the page.
 fn reject_bad_scrape(
     provider: &'static str,
     results: &mut Vec<SearchResult>,
@@ -680,20 +657,25 @@ fn reject_bad_scrape(
     failures: &mut Vec<ProviderFailure>,
     counts: &mut BTreeMap<String, usize>,
 ) {
-    let Some(reason) = results.first().and_then(|r| scrape_rejection(&r.snippet)) else {
+    let mut first_wall = None;
+    results.retain(|r| match walls::classify_content(&r.snippet) {
+        Some(wall) => {
+            first_wall.get_or_insert(wall);
+            false
+        }
+        None => true,
+    });
+    let Some(wall) = first_wall else {
         return;
     };
-    tracing::warn!("{provider}: {reason}");
-    results.clear();
+    if !results.is_empty() {
+        counts.insert(provider.to_string(), results.len());
+        return;
+    }
+    let failure = wall.failure(provider, None);
+    tracing::warn!("{}", failure.reason);
     counts.remove(provider);
-    failures.push(ProviderFailure {
-        provider: provider.to_string(),
-        category: FailureCategory::Parse,
-        http_status: None,
-        code: "garbage_content".to_string(),
-        reason: format!("{provider} returned {reason}"),
-        retryable: false,
-    });
+    failures.push(failure);
     failed.push(provider.to_string());
 }
 
@@ -824,22 +806,42 @@ mod tests {
     }
 
     #[test]
-    fn scrape_rejection_catches_binary_and_challenge_pages() {
-        use super::scrape_rejection;
-        // Mojibake: mostly replacement characters.
-        let binary: String = "\u{FFFD}x\u{FFFD}\u{FFFD}".repeat(100);
-        assert!(scrape_rejection(&binary).is_some());
-        // Cloudflare interstitial served as 200.
-        assert!(
-            scrape_rejection("## Checking your browser before accessing\nexample.com").is_some()
+    fn reject_bad_scrape_drops_walls_and_records_failure() {
+        use super::reject_bad_scrape;
+        use crate::types::FailureCategory;
+        use std::collections::BTreeMap;
+        let mut wall = result("https://x.com/a", "jina");
+        wall.snippet = format!("Log In Sign Up {}", "Terms Privacy ".repeat(20));
+        let mut real = result("https://x.com/b", "jina");
+        real.snippet = "Real sentence with ordinary words. ".repeat(10);
+
+        let (mut failed, mut failures, mut counts) = (vec![], vec![], BTreeMap::new());
+        let mut results = vec![wall.clone(), real];
+        counts.insert("jina".to_string(), 2);
+        reject_bad_scrape(
+            "jina",
+            &mut results,
+            &mut failed,
+            &mut failures,
+            &mut counts,
         );
-        // Real prose passes, even when long or mentioning Cloudflare.
-        let article = format!(
-            "How Cloudflare works. {}",
-            "Real sentence with ordinary words. ".repeat(300)
+        assert_eq!(results.len(), 1);
+        assert!(failures.is_empty());
+        assert_eq!(counts["jina"], 1);
+
+        let mut results = vec![wall];
+        reject_bad_scrape(
+            "jina",
+            &mut results,
+            &mut failed,
+            &mut failures,
+            &mut counts,
         );
-        assert!(scrape_rejection(&article).is_none());
-        assert!(scrape_rejection("Short but real snippet about rust.").is_none());
+        assert!(results.is_empty());
+        assert_eq!(failures[0].code, "login_wall");
+        assert_eq!(failures[0].category, FailureCategory::Blocked);
+        assert_eq!(failed, vec!["jina".to_string()]);
+        assert!(!counts.contains_key("jina"));
     }
 
     #[test]

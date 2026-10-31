@@ -37,6 +37,9 @@ struct FirecrawlMetadata {
     title: Option<String>,
     #[serde(rename = "sourceURL")]
     source_url: Option<String>,
+    /// Status the target site returned to Firecrawl's fetcher.
+    #[serde(rename = "statusCode")]
+    status_code: Option<u16>,
 }
 
 #[async_trait]
@@ -175,7 +178,18 @@ impl Firecrawl {
                 let meta = data.metadata.unwrap_or(FirecrawlMetadata {
                     title: None,
                     source_url: None,
+                    status_code: None,
                 });
+                if let Some(wall) = target_wall(meta.status_code) {
+                    return Err(SearchError::Blocked {
+                        provider: "firecrawl",
+                        code: wall.code(),
+                        message: format!(
+                            "target site answered HTTP {} to Firecrawl",
+                            meta.status_code.unwrap_or_default()
+                        ),
+                    });
+                }
                 Ok(vec![SearchResult {
                     title: meta.title.unwrap_or_default(),
                     url: meta.source_url.unwrap_or_else(|| url.to_string()),
@@ -190,5 +204,30 @@ impl Firecrawl {
             }
         })
         .await
+    }
+}
+
+/// The target's own status, as Firecrawl reports it. A 401/403/999 from the
+/// site means a wall, whatever markdown Firecrawl rendered from the block page.
+fn target_wall(status: Option<u16>) -> Option<crate::walls::Wall> {
+    use crate::walls::Wall;
+    match status? {
+        401 | 999 => Some(Wall::Login),
+        403 => Some(Wall::Bot),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::target_wall;
+    use crate::walls::Wall;
+
+    #[test]
+    fn target_status_maps_to_walls() {
+        assert_eq!(target_wall(Some(403)), Some(Wall::Bot));
+        assert_eq!(target_wall(Some(999)), Some(Wall::Login));
+        assert_eq!(target_wall(Some(200)), None);
+        assert_eq!(target_wall(None), None);
     }
 }

@@ -111,6 +111,8 @@ pub enum FailureCategory {
     Server,
     /// Response body could not be parsed.
     Parse,
+    /// The site served a bot-protection or login wall instead of content.
+    Blocked,
     /// Local configuration or usage error.
     Config,
     /// Anything else.
@@ -128,6 +130,7 @@ impl FailureCategory {
             Self::BadRequest => "bad_request",
             Self::Server => "server",
             Self::Parse => "parse",
+            Self::Blocked => "blocked",
             Self::Config => "config",
             Self::Other => "other",
         }
