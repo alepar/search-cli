@@ -34,7 +34,7 @@ fn test_help_output() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Aggregates 13 search providers"))
+        .stdout(predicate::str::contains("Aggregates 14 search providers"))
         .stdout(predicate::str::contains("brave"))
         .stdout(predicate::str::contains("serper"))
         .stdout(predicate::str::contains("exa"));
@@ -304,6 +304,42 @@ fn test_real_provider_filter_single() {
         "  PASS provider filter (exa only): {} results",
         json["results"].as_array().unwrap().len()
     );
+}
+
+#[test]
+fn test_real_kagi_general_and_news() {
+    if !has_provider("kagi") {
+        eprintln!("SKIP: need kagi");
+        return;
+    }
+
+    for mode in ["general", "news"] {
+        let output = search_cmd()
+            .args([
+                "search",
+                "-q",
+                "rust programming language",
+                "-m",
+                mode,
+                "-p",
+                "kagi",
+                "--json",
+                "-c",
+                "3",
+            ])
+            .output()
+            .unwrap();
+
+        assert!(output.status.success(), "kagi {mode} search failed");
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let results = json["results"].as_array().unwrap();
+        assert!(!results.is_empty(), "kagi {mode} returned 0 results");
+        assert!(results.len() <= 3);
+        for r in results {
+            assert_eq!(r["source"], "kagi");
+        }
+        eprintln!("  PASS kagi {mode}: {} results", results.len());
+    }
 }
 
 #[test]
