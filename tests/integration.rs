@@ -6,22 +6,28 @@ fn search_cmd() -> Command {
     Command::cargo_bin("search").unwrap()
 }
 
-/// Check if any provider key is configured (reads from config file)
-fn has_any_provider() -> bool {
+/// Providers with a key configured, per `search config check`. Under the test
+/// harness stdout is a pipe, so the command emits its JSON envelope.
+fn configured_providers() -> Vec<String> {
     let output = search_cmd().args(["config", "check"]).output().unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout.contains("[+]") || stdout.contains("OK")
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_default();
+    json["configured"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Check if any provider key is configured
+fn has_any_provider() -> bool {
+    !configured_providers().is_empty()
 }
 
 fn has_provider(name: &str) -> bool {
-    let output = search_cmd().args(["config", "check"]).output().unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        if line.contains(name) && (line.contains("[+]") || line.contains("OK")) {
-            return true;
-        }
-    }
-    false
+    configured_providers().iter().any(|p| p == name)
 }
 
 // =============================================================================
