@@ -45,6 +45,10 @@
   remaining balance. JSON gains `pay_as_you_go`, `plan_remaining`,
   `paygo_usage`, `paygo_limit` and `summary`; `credits_remaining` is null when
   PAYG has no cap.
+- SerpApi: Scholar results carry their citation counts again (`cited_by` is
+  read from `inline_links`). Google News no longer gets `num`/`tbs`, which that
+  engine does not take; `-f` maps to a `when:` query operator there, and news
+  dates prefer `iso_date`.
 
 ## 0.10.0 — 2026-10-31
 
