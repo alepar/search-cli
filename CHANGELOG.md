@@ -1,7 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.12.0 — 2026-10-31
 
+Security:
+- Provider API keys no longer leak through error text: every error message
+  (engine warnings, `search doctor`, `search usage`, JSON envelopes) is
+  redacted.
+- `search whoami` and `search logout --revoke` now apply the same
+  metasearch host check as `search login`, so a tampered config cannot send
+  the stored token to another host. `logout` still clears the local key.
+
+Features:
 - New `reddit` mode: Reddit threads fused across Perplexity's Search API,
   Serper, Kagi, Tavily and Brave, scoped to reddit.com. Thread URLs only, one
   canonical URL per thread (`extra.post_id`, `subreddit`, `comment_id`).
