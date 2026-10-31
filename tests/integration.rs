@@ -2,8 +2,16 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use std::time::Instant;
 
+/// The binary under test. Cache and logs go to a scratch dir under target/
+/// (Linux XDG paths), so test searches never touch the developer's real cache
+/// or daily logs; config still comes from the real config dir, which is where
+/// the live tests find their API keys.
 fn search_cmd() -> Command {
-    Command::cargo_bin("search").unwrap()
+    let scratch = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("integration-xdg");
+    let mut cmd = Command::cargo_bin("search").unwrap();
+    cmd.env("XDG_CACHE_HOME", scratch.join("cache"))
+        .env("XDG_DATA_HOME", scratch.join("data"));
+    cmd
 }
 
 /// Providers with a key configured, per `search config check`. Under the test
@@ -21,9 +29,11 @@ fn configured_providers() -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Check if any provider key is configured
+/// Check if any search provider is configured. Stealth needs no key, so it
+/// counts as configured in stealth builds, but it only scrapes URLs and cannot
+/// serve the live search tests.
 fn has_any_provider() -> bool {
-    !configured_providers().is_empty()
+    configured_providers().iter().any(|p| p != "stealth")
 }
 
 fn has_provider(name: &str) -> bool {
@@ -421,8 +431,17 @@ fn test_real_last_cache() {
         return;
     }
 
+    // Own cache dir: other live tests run in parallel and would overwrite
+    // last.json between the search and the replay.
+    let cache = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("last-cache-test");
+    let cached_cmd = || {
+        let mut cmd = search_cmd();
+        cmd.env("XDG_CACHE_HOME", &cache);
+        cmd
+    };
+
     // First search to populate cache
-    let output1 = search_cmd()
+    let output1 = cached_cmd()
         .args(["search", "-q", "cache test query", "--json", "-c", "3"])
         .output()
         .unwrap();
@@ -430,7 +449,7 @@ fn test_real_last_cache() {
 
     // Replay from cache
     let start = Instant::now();
-    let output2 = search_cmd().args(["--last", "--json"]).output().unwrap();
+    let output2 = cached_cmd().args(["--last", "--json"]).output().unwrap();
     let cache_elapsed = start.elapsed();
 
     assert!(output2.status.success());

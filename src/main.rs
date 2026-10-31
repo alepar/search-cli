@@ -3,6 +3,7 @@ mod cache;
 mod cli;
 mod config;
 mod context;
+mod dates;
 mod doctor;
 mod engine;
 mod errors;
@@ -27,16 +28,11 @@ use tokio::net::lookup_host;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-/// Global flags read straight from argv. Needed because `query_words` uses
-/// `trailing_var_arg`, which otherwise swallows flags placed AFTER a bare query
-/// (`search foo --json` — clap never sees the `--json`), and because the
-/// help/version/parse-error paths run before clap has populated `Cli`.
+/// Global flags read straight from argv: tracing starts, and the
+/// help/version/parse-error paths render, before clap has populated `Cli`.
 #[derive(Default, Clone, Copy)]
 struct GlobalFlags {
     json: bool,
-    quiet: bool,
-    last: bool,
-    x_only: bool,
     debug: bool,
 }
 
@@ -49,9 +45,6 @@ fn scan_global_flags() -> GlobalFlags {
         }
         match arg.to_str() {
             Some("--json") => f.json = true,
-            Some("--quiet") => f.quiet = true,
-            Some("--last") => f.last = true,
-            Some("--x") => f.x_only = true,
             Some("--debug") | Some("--verbose") => f.debug = true,
             _ => {}
         }
@@ -59,9 +52,134 @@ fn scan_global_flags() -> GlobalFlags {
     f
 }
 
-/// Global-flag tokens to strip from a bare query that `trailing_var_arg`
-/// captured, so `search foo --json` searches "foo", not "foo --json".
+/// Global flags, which may appear anywhere, including before a subcommand.
 const GLOBAL_FLAG_TOKENS: &[&str] = &["--json", "--quiet", "--last", "--x", "--debug", "--verbose"];
+
+/// Expand the bare-query shorthand into the `search` subcommand, so search
+/// options work on either side of the query: `search "q" -p tavily -c 2` and
+/// `search -p tavily "q"` both become `search search ... -- q`. The first
+/// token that is not a global flag decides: a subcommand name or a top-level
+/// help/version flag leaves argv untouched; anything else is a search.
+///
+/// Before the first query word, tokens go to clap as written. After it, a
+/// token is an option only if it is exactly a search option (`-c 2`,
+/// `--count=2`, `--json`); anything else is a query word, so search
+/// operators such as `jaguar -car` or `-site:pinterest.com` stay literal
+/// instead of parsing as `-c ar` or `-s ite:...`. Query words are placed
+/// after `--` so clap never reads them as options.
+fn expand_bare_query(
+    argv: Vec<std::ffi::OsString>,
+    subcommands: &[String],
+    options: &[SearchOption],
+) -> Vec<std::ffi::OsString> {
+    let first = argv
+        .iter()
+        .skip(1)
+        .find(|a| !GLOBAL_FLAG_TOKENS.iter().any(|g| a.as_os_str() == *g));
+    let Some(first) = first else {
+        return argv;
+    };
+    let keep = match first.to_str() {
+        Some("-h" | "--help" | "-V" | "--version") => true,
+        Some(t) => subcommands.iter().any(|s| s == t),
+        None => false,
+    };
+    if keep {
+        return argv;
+    }
+
+    let mut args = argv.into_iter();
+    let mut out: Vec<std::ffi::OsString> = vec![args.next().unwrap_or_default(), "search".into()];
+    let mut words = Vec::new();
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            words.extend(args.by_ref());
+            break;
+        }
+        let tok = arg.to_str().unwrap_or_default();
+        let is_option = |o: &&SearchOption| {
+            o.names.iter().any(|n| n == tok)
+                || o.names
+                    .iter()
+                    .any(|n| n.starts_with("--") && tok.starts_with(&format!("{n}=")))
+        };
+        if words.is_empty() && tok.starts_with('-') {
+            // Before the query: pass through for clap to parse (or reject).
+            let takes_value = options
+                .iter()
+                .find(is_option)
+                .is_some_and(|o| o.takes_value && !tok.contains('='));
+            out.push(arg);
+            if takes_value && let Some(v) = args.next() {
+                out.push(v);
+            }
+        } else if let Some(o) = options.iter().find(is_option) {
+            out.push(arg.clone());
+            if o.takes_value
+                && !tok.contains('=')
+                && let Some(v) = args.next()
+            {
+                out.push(v);
+            }
+        } else {
+            words.push(arg);
+        }
+    }
+    if !words.is_empty() {
+        out.push("--".into());
+        out.extend(words);
+    }
+    out
+}
+
+/// A `search` subcommand option as spelled on the command line.
+struct SearchOption {
+    /// `-c`, `--count`, plus global flags such as `--json`.
+    names: Vec<String>,
+    takes_value: bool,
+}
+
+/// Every option the `search` subcommand accepts, global flags included.
+fn search_options() -> Vec<SearchOption> {
+    use clap::CommandFactory;
+    let mut cmd = Cli::command();
+    cmd.build();
+    let search = cmd
+        .find_subcommand("search")
+        .expect("search subcommand exists");
+    search
+        .get_arguments()
+        .filter(|a| !a.is_positional())
+        .map(|a| SearchOption {
+            names: a
+                .get_short_and_visible_aliases()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|c| format!("-{c}"))
+                .chain(
+                    a.get_long_and_visible_aliases()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|l| format!("--{l}")),
+                )
+                .collect(),
+            takes_value: a.get_action().takes_values(),
+        })
+        .collect()
+}
+
+/// Names and aliases of every subcommand, plus clap's implicit `help`.
+fn subcommand_names() -> Vec<String> {
+    use clap::CommandFactory;
+    let cmd = Cli::command();
+    let mut names: Vec<String> = cmd
+        .get_subcommands()
+        .flat_map(|c| std::iter::once(c.get_name()).chain(c.get_all_aliases()))
+        .map(String::from)
+        .collect();
+    names.push("help".into());
+    names
+}
 
 /// Initialize tracing to stderr so provider/engine diagnostics are never silently
 /// dropped. Honors `RUST_LOG`; `--debug` raises the default level to `debug`.
@@ -105,14 +223,19 @@ async fn main() {
     // 2. Start loading config in parallel with CLI parsing
     let config_handle = tokio::task::spawn_blocking(load_config);
 
-    // 3. Pre-scan global flags before clap parses (covers flags trailing a bare
-    //    query, plus the help/version/error paths). Init tracing immediately.
+    // 3. Pre-scan global flags before clap parses (for the help/version/error
+    //    paths). Init tracing immediately.
     let flags = scan_global_flags();
     init_tracing(flags.debug);
     let json_flag = flags.json;
 
     // 4. CLI Parsing — use try_parse so we own error handling
-    let mut cli = match Cli::try_parse() {
+    let argv = expand_bare_query(
+        std::env::args_os().collect(),
+        &subcommand_names(),
+        &search_options(),
+    );
+    let cli = match Cli::try_parse_from(argv) {
         Ok(cli) => cli,
         Err(e) => {
             if matches!(
@@ -147,13 +270,6 @@ async fn main() {
             std::process::exit(err.exit_code());
         }
     };
-
-    // Merge pre-scanned flags so flags trailing a bare query still take effect.
-    cli.json |= flags.json;
-    cli.quiet |= flags.quiet;
-    cli.last |= flags.last;
-    cli.x_only |= flags.x_only;
-    cli.debug |= flags.debug;
 
     let ctx = Ctx::new(cli.json, cli.quiet);
 
@@ -245,6 +361,7 @@ fn apply_max_chars(response: &mut types::SearchResponse, max_chars: Option<usize
 fn default_search_args(query: String) -> cli::SearchArgs {
     cli::SearchArgs {
         query,
+        words: Vec::new(),
         mode: types::Mode::General,
         count: None,
         providers: None,
@@ -265,17 +382,6 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
         cmd
     } else if cli.last {
         Commands::Search(default_search_args(String::new()))
-    } else if !cli.query_words.is_empty() {
-        // Drop any global-flag tokens trailing_var_arg swallowed into the query
-        // (their effect was already applied via the pre-scan merge in main).
-        let query = cli
-            .query_words
-            .iter()
-            .filter(|w| !GLOBAL_FLAG_TOKENS.contains(&w.as_str()))
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(" ");
-        Commands::Search(default_search_args(query))
     } else {
         use clap::CommandFactory;
         if ctx.is_json() {
@@ -296,6 +402,14 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
 
     match command {
         Commands::Search(mut args) => {
+            if !args.words.is_empty() {
+                let words = std::mem::take(&mut args.words).join(" ");
+                args.query = if args.query.is_empty() {
+                    words
+                } else {
+                    format!("{} {words}", args.query)
+                };
+            }
             // --x flag: force X/Twitter search via xAI Grok
             if cli.x_only {
                 args.mode = types::Mode::Social;
@@ -387,15 +501,15 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                     ctx,
                 );
             }
-            if let Some(c) = args.count {
-                if c == 0 || c > 100 {
-                    return bail(
-                        errors::SearchError::InvalidInput {
-                            message: format!("-c must be between 1 and 100 (got {c})"),
-                        },
-                        ctx,
-                    );
-                }
+            if let Some(c) = args.count
+                && (c == 0 || c > 100)
+            {
+                return bail(
+                    errors::SearchError::InvalidInput {
+                        message: format!("-c must be between 1 and 100 (got {c})"),
+                    },
+                    ctx,
+                );
             }
 
             // URL-input modes (extract/scrape/similar) take a URL, not a
@@ -422,10 +536,9 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             // into localhost, the LAN, or cloud metadata.
             if matches!(args.mode, types::Mode::Extract | types::Mode::Scrape)
                 && !args.allow_private
+                && let Err(err) = guard::assert_public_url(&args.query).await
             {
-                if let Err(err) = guard::assert_public_url(&args.query).await {
-                    return bail(err, ctx);
-                }
+                return bail(err, ctx);
             }
 
             let count = args
@@ -452,19 +565,20 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 && opts.freshness.is_none()
                 && opts.country.is_none()
                 && opts.lang.is_none();
-            if cacheable && !args.no_cache {
-                if let Some((mut cached, age)) = cache::load_query(&args.query, &mode_str, count) {
-                    cached.metadata.cached = true;
-                    cached.metadata.cache_age_secs = Some(age);
-                    logging::log_search(&cached);
-                    apply_max_chars(&mut cached, args.max_chars);
-                    if ctx.is_json() {
-                        output::json::render(&cached);
-                    } else if !ctx.suppress_human() {
-                        output::table::render(&cached);
-                    }
-                    return Ok(0);
+            if cacheable
+                && !args.no_cache
+                && let Some((mut cached, age)) = cache::load_query(&args.query, &mode_str, count)
+            {
+                cached.metadata.cached = true;
+                cached.metadata.cache_age_secs = Some(age);
+                logging::log_search(&cached);
+                apply_max_chars(&mut cached, args.max_chars);
+                if ctx.is_json() {
+                    output::json::render(&cached);
+                } else if !ctx.suppress_human() {
+                    output::table::render(&cached);
                 }
+                return Ok(0);
             }
 
             // Show spinner for human output (suppressed by --quiet)
@@ -907,6 +1021,13 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                         println!("  {:<12} {}", u.provider, "not configured".yellow());
                     } else if let Some(err) = &u.error {
                         println!("  {:<12} {}", u.provider.bold(), err.red());
+                    } else if let Some(summary) = u
+                        .data
+                        .as_ref()
+                        .and_then(|d| d.get("summary"))
+                        .and_then(|v| v.as_str())
+                    {
+                        println!("  {:<12} {}", u.provider.bold(), summary.green());
                     } else if let Some(data) = &u.data {
                         let remaining = data
                             .get("credits_remaining")
@@ -1078,25 +1199,36 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                         .current_version(current)
                         .build()
                         .and_then(|u| u.get_latest_release())
+                        // The github backend errors on an empty listing, so latest()
+                        // is always Some. "Available" is a semver comparison, the
+                        // same rule `search update` installs by: a local build newer
+                        // than the latest release is not offered a downgrade.
+                        .and_then(|releases| {
+                            let available = releases.is_update_available()?;
+                            let latest = releases
+                                .latest()
+                                .map_or_else(|| current.to_string(), |r| r.version().to_string());
+                            Ok((latest, available))
+                        })
                 })
                 .await
                 .map_err(|e| errors::SearchError::Config(format!("update task failed: {e}")))?;
 
                 match res {
-                    Ok(release) => {
-                        let up_to_date = release.version == current;
+                    Ok((latest, available)) => {
+                        let up_to_date = !available;
                         if ctx.is_json() {
                             output::json::render_value(&serde_json::json!({
                                 "version": types::ENVELOPE_VERSION,
                                 "status": "success",
                                 "current_version": current,
-                                "latest_version": release.version,
+                                "latest_version": latest,
                                 "update_available": !up_to_date,
                             }));
                         } else if !ctx.suppress_human() {
                             if !up_to_date {
                                 eprintln!("Current version: {current}");
-                                eprintln!("New version available: {}", release.version);
+                                eprintln!("New version available: {latest}");
                                 eprintln!("Run `search update` to install");
                             } else {
                                 eprintln!("Already up to date (v{current})");
@@ -1123,24 +1255,27 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 if !ctx.suppress_human() {
                     eprintln!("Updating search from v{current}...");
                 }
+                // `search update` is the confirmation: an interactive prompt
+                // would abort every non-TTY (agent) run. Progress text goes
+                // to stdout, so keep it out of JSON output.
+                let show_output = !ctx.is_json() && !ctx.suppress_human();
                 let res = tokio::task::spawn_blocking(
                     move || -> Result<_, self_update::errors::Error> {
-                        // self_update's default .update() can resolve to the wrong
-                        // (older) release when several are newer than current. Pin
-                        // it to the actual latest tag (get_latest_release is correct).
-                        let latest = self_update::backends::github::Update::configure()
-                            .repo_owner("alepar")
-                            .repo_name("search-cli")
-                            .bin_name("search")
-                            .current_version(current)
-                            .build()?
-                            .get_latest_release()?;
+                        // Latest, not the default Compatible: on 0.x every minor
+                        // release is semver-incompatible, and Compatible would stop
+                        // at the newest patch of the current minor. The release's
+                        // SHA256SUMS (also used by install.sh) must match the
+                        // downloaded archive before anything is installed.
                         self_update::backends::github::Update::configure()
                             .repo_owner("alepar")
                             .repo_name("search-cli")
                             .bin_name("search")
                             .current_version(current)
-                            .target_version_tag(&format!("v{}", latest.version))
+                            .update_strategy(self_update::UpdateStrategy::Latest)
+                            .checksum_from_asset("SHA256SUMS")
+                            .no_confirm(true)
+                            .show_output(show_output)
+                            .show_download_progress(show_output)
                             .build()?
                             .update()
                     },
@@ -1154,11 +1289,11 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                             output::json::render_value(&serde_json::json!({
                                 "version": types::ENVELOPE_VERSION,
                                 "status": "success",
-                                "updated": status.updated(),
+                                "updated": status.is_updated(),
                                 "version_installed": status.version(),
                             }));
                         } else if !ctx.suppress_human() {
-                            if status.updated() {
+                            if status.is_updated() {
                                 eprintln!("Updated to v{}", status.version());
                             } else {
                                 eprintln!("Already up to date (v{current})");
@@ -1180,6 +1315,109 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                     }
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    /// Parse argv the way main() does and return the search args.
+    fn parse_search(argv: &[&str]) -> cli::SearchArgs {
+        let argv = std::iter::once("search").chain(argv.iter().copied());
+        let argv = expand_bare_query(
+            argv.map(Into::into).collect(),
+            &subcommand_names(),
+            &search_options(),
+        );
+        match Cli::try_parse_from(argv).unwrap().command {
+            Some(Commands::Search(args)) => args,
+            _ => panic!("not a search command"),
+        }
+    }
+
+    #[test]
+    fn options_after_bare_query() {
+        let a = parse_search(&["rust tokio runtime", "-p", "tavily", "-c", "2"]);
+        assert_eq!(a.words, ["rust tokio runtime"]);
+        assert_eq!(a.providers.as_deref(), Some(&["tavily".to_string()][..]));
+        assert_eq!(a.count, Some(2));
+    }
+
+    #[test]
+    fn options_before_bare_query() {
+        let a = parse_search(&["-p", "tavily", "-m", "news", "rust", "tokio"]);
+        assert_eq!(a.words, ["rust", "tokio"]);
+        assert_eq!(a.providers.as_deref(), Some(&["tavily".to_string()][..]));
+        assert!(matches!(a.mode, types::Mode::News));
+    }
+
+    #[test]
+    fn global_flags_around_bare_query() {
+        let argv = ["search", "--json", "rust", "--quiet"].map(std::ffi::OsString::from);
+        let cli = Cli::try_parse_from(expand_bare_query(
+            argv.to_vec(),
+            &subcommand_names(),
+            &search_options(),
+        ))
+        .unwrap();
+        assert!(cli.json && cli.quiet);
+        assert!(matches!(cli.command, Some(Commands::Search(ref a)) if a.words == ["rust"]));
+    }
+
+    #[test]
+    fn dashed_words_after_query_stay_literal() {
+        // Search operators must not parse as -c ar, -s ite:..., -p andas, -q uiz.
+        for (argv, words) in [
+            (&["jaguar", "-car"][..], &["jaguar", "-car"][..]),
+            (
+                &["jaguar", "-site:pinterest.com"],
+                &["jaguar", "-site:pinterest.com"],
+            ),
+            (&["rust", "-pandas", "-c", "3"], &["rust", "-pandas"]),
+            (&["python", "-quiz"], &["python", "-quiz"]),
+        ] {
+            let a = parse_search(argv);
+            assert_eq!(a.words, words, "{argv:?}");
+            assert!(a.providers.is_none(), "{argv:?}");
+        }
+        let a = parse_search(&["rust", "-pandas", "-c", "3"]);
+        assert_eq!(a.count, Some(3));
+        let a = parse_search(&["rust", "--count=4", "-car"]);
+        assert_eq!(
+            (a.count, &a.words[..]),
+            (Some(4), &["rust".to_string(), "-car".into()][..])
+        );
+    }
+
+    #[test]
+    fn explicit_subcommand_and_dashed_words() {
+        let a = parse_search(&["search", "rust", "-p", "brave"]);
+        assert_eq!(a.words, ["rust"]);
+        let a = parse_search(&["-q", "rust", "--", "-tokio"]);
+        assert_eq!(
+            (a.query.as_str(), &a.words[..]),
+            ("rust", &["-tokio".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn subcommands_help_and_last_are_not_rewritten() {
+        let names = subcommand_names();
+        for argv in [
+            &["search", "config", "check"][..],
+            &["search", "--help"],
+            &["search", "-V"],
+            &["search", "--last", "--json"],
+            &["search", "help"],
+        ] {
+            let argv: Vec<std::ffi::OsString> = argv.iter().map(Into::into).collect();
+            assert_eq!(
+                expand_bare_query(argv.clone(), &names, &search_options()),
+                argv
+            );
         }
     }
 }

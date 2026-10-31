@@ -15,20 +15,15 @@ jobs:
         include:
           - target: x86_64-apple-darwin
             os: macos-latest
-            flags: ""
           - target: aarch64-apple-darwin
             os: macos-latest
-            flags: ""
-          # Linux ships without the stealth feature (wreq/BoringSSL doesn't
-          # link on Linux runners); the extract chain starts at jina there.
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            flags: "--no-default-features"
 
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -37,7 +32,7 @@ jobs:
 
       - name: Build
         # --locked: reproducible release builds from the committed Cargo.lock.
-        run: cargo build --release --locked ${{ matrix.flags }} --target ${{ matrix.target }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package
         run: |
@@ -46,7 +41,7 @@ jobs:
           cd ../../..
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: search-${{ matrix.target }}
           path: search-${{ matrix.target }}.tar.gz
@@ -55,17 +50,17 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           merge-multiple: true
 
-      # One checksums file per release: install.sh and the Homebrew bump
+      # One checksums file per release: install.sh and `search update`
       # verify against it instead of hand-computing hashes.
       - name: Checksums
         run: sha256sum search-*.tar.gz > SHA256SUMS
 
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             search-*.tar.gz

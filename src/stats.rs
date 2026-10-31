@@ -16,7 +16,8 @@ fn estimated_cost_per_call(provider: &str) -> f64 {
         "jina" => 0.0005,
         "firecrawl" => 0.002,
         "brave" => 0.005,
-        "parallel" => 0.005,
+        // Search API `fast` mode: $1 per 1,000 requests (docs, 2026-10).
+        "parallel" => 0.001,
         "linkup" => 0.0055,
         "kagi" => 0.012,
         "exa" => 0.007,
@@ -98,10 +99,10 @@ fn read_entries(days: u64) -> (Vec<serde_json::Value>, u64) {
         };
         files += 1;
         for line in content.lines() {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-                if v.get("ts").and_then(|t| t.as_u64()).unwrap_or(0) >= cutoff {
-                    entries.push(v);
-                }
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line)
+                && v.get("ts").and_then(|t| t.as_u64()).unwrap_or(0) >= cutoff
+            {
+                entries.push(v);
             }
         }
     }
@@ -134,11 +135,11 @@ pub fn compute(days: u64) -> StatsReport {
 
         // Read-through: an extract/scrape whose target URL was previously
         // returned by a search credits every provider that returned it.
-        if matches!(mode, "extract" | "scrape") {
-            if let Some(sources) = url_sources.get(&normalize(query)) {
-                for s in sources.clone() {
-                    by_provider.entry(s).or_default().result_read_through += 1;
-                }
+        if matches!(mode, "extract" | "scrape")
+            && let Some(sources) = url_sources.get(&normalize(query))
+        {
+            for s in sources.clone() {
+                by_provider.entry(s).or_default().result_read_through += 1;
             }
         }
 

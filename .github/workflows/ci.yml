@@ -4,17 +4,21 @@ on:
   push:
     branches: [master]
   pull_request:
+  workflow_dispatch:
+  # Weekly: catches new RustSec advisories and new stable-toolchain lints
+  # between pushes.
+  schedule:
+    - cron: "17 6 * * 1"
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # macOS release targets build here (default features).
   check:
-    # macOS matches release.yml — rquest/boring-sys links cleanly here, unlike
-    # Linux CI. Keeps the gate on the same platform we ship.
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -32,27 +36,62 @@ jobs:
       - name: Test
         run: cargo test --locked
 
-  # Linux build without the stealth feature (wreq/BoringSSL doesn't link on
-  # Linux runners) — proves the container/agent-fleet build stays green.
   linux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Test (no stealth)
-        run: cargo test --locked --no-default-features
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
 
-  # Advisory + license + source gate. wreq is a pre-release pin inherited
-  # from the yanked rquest crate — exactly the dependency class to watch.
+      - name: Test
+        run: cargo test --locked
+
+  # The opt-in stealth scraper: wreq + BoringSSL, built from source with
+  # cmake and clang. Not in the default build or the release binaries.
+  stealth:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y cmake clang libclang-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy (stealth)
+        run: cargo clippy --all-targets --locked --features stealth -- -D warnings
+
+      - name: Test (stealth)
+        run: cargo test --locked --features stealth
+
+  # Oldest supported toolchain, from rust-version in Cargo.toml.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.89
+      - uses: Swatinem/rust-cache@v2
+      - name: Check
+        run: cargo check --all-targets --locked
+
+  # Advisory + license + source gate, all features.
   deny:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories licenses sources

@@ -72,10 +72,10 @@ pub struct IdentityKey {
 
 /// Account base URL: `METASEARCH_URL` > config > metasearch.sh.
 pub fn resolve_base_url(config: &AppConfig) -> String {
-    if let Ok(v) = std::env::var("METASEARCH_URL") {
-        if !v.is_empty() {
-            return v.trim_end_matches('/').to_string();
-        }
+    if let Ok(v) = std::env::var("METASEARCH_URL")
+        && !v.is_empty()
+    {
+        return v.trim_end_matches('/').to_string();
     }
     if !config.metasearch.url.is_empty() {
         return config.metasearch.url.trim_end_matches('/').to_string();
@@ -129,10 +129,10 @@ fn assert_login_host_allowed(base: &str) -> Result<(), SearchError> {
 
 /// Account API key: `METASEARCH_TOKEN` > config. Empty means "not logged in".
 pub fn resolve_token(config: &AppConfig) -> String {
-    if let Ok(v) = std::env::var("METASEARCH_TOKEN") {
-        if !v.is_empty() {
-            return v;
-        }
+    if let Ok(v) = std::env::var("METASEARCH_TOKEN")
+        && !v.is_empty()
+    {
+        return v;
     }
     config.metasearch.token.clone()
 }
@@ -150,10 +150,10 @@ fn api_error(message: impl Into<String>) -> SearchError {
 /// laptop a key belongs to. Absence is fine — the server defaults gracefully.
 fn hostname() -> Option<String> {
     for var in ["HOSTNAME", "COMPUTERNAME"] {
-        if let Ok(v) = std::env::var(var) {
-            if !v.trim().is_empty() {
-                return Some(v.trim().to_string());
-            }
+        if let Ok(v) = std::env::var(var)
+            && !v.trim().is_empty()
+        {
+            return Some(v.trim().to_string());
         }
     }
     let out = std::process::Command::new("hostname").output().ok()?;

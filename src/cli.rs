@@ -23,7 +23,7 @@ use clap::{Parser, Subcommand};
           serpapi    Many engines (Google, Bing, YouTube, Baidu, Scholar)\n  \
           perplexity LLM-synthesized answer with citations (Agent API)\n  \
           browserless Cloud browser for Cloudflare/JS-heavy pages\n  \
-          stealth    Local anti-bot scraper (no API key)\n  \
+          stealth    Local anti-bot scraper (no API key; opt-in build feature)\n  \
           xai        Only real-time X/Twitter search (Grok agentic)\n\n\
         EXAMPLES:\n  \
           search \"rust error handling\"                    # general web search\n  \
@@ -39,10 +39,6 @@ use clap::{Parser, Subcommand};
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
-
-    /// Search query (shorthand for `search -q`)
-    #[arg(trailing_var_arg = true, global = false)]
-    pub query_words: Vec<String>,
 
     /// Output as JSON (auto-enabled when piped)
     #[arg(long, global = true)]
@@ -169,9 +165,14 @@ pub struct VerifyArgs {
 
 #[derive(Parser)]
 pub struct SearchArgs {
-    /// Search query
-    #[arg(short, long)]
+    /// Search query (or give it as bare words: `search search rust tokio`)
+    #[arg(short, long, default_value = "")]
     pub query: String,
+
+    /// Query words; joined with spaces and appended to --query. Options may
+    /// come before or after them. A word starting with '-' needs `--` first.
+    #[arg(value_name = "QUERY")]
+    pub words: Vec<String>,
 
     /// Search mode (default: general). Choose explicitly: general, news,
     /// academic, deep, social, scholar, patents, people, places, images,

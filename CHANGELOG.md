@@ -25,6 +25,56 @@
   mode per request, and the old code mixed them). `--country` is now forwarded
   as `user_location.country`. `search stats` estimates $0.003 per call, down
   from $0.012.
+- Stealth scraper is now opt-in (`--features stealth`) and no longer in the
+  default build or release binaries. It moves to the stable wreq 0.16 /
+  wreq-util 0.2 line (Chrome 149 profile; needs Rust 1.98+, cmake, clang and
+  a C++ compiler). It now sends only the emulation profile's own headers: the
+  forged Google `Referer` and the hand-written Chrome 136 client hints are
+  gone. Fixes: responses are decompressed (every stealth fetch previously
+  failed with `garbage_content`), and the HTML text fallback no longer panics
+  or garbles non-ASCII text. The stealth build links on Linux; CI builds and
+  tests it there.
+- Install docs point at this fork: install.sh, GitHub Releases, or
+  `cargo install --git https://github.com/alepar/search-cli`. The Homebrew tap
+  and crates.io instructions were upstream's.
+- Tavily: result dates now populate (the code read `published_time`; the API
+  field is `published_date`). Auth moves to the documented Bearer header, and
+  `-c` is capped at the API maximum of 20.
+- `search usage` on a Tavily pay-as-you-go account reports the overage
+  ("pay-as-you-go: N credits of overage this cycle") instead of a negative
+  remaining balance. JSON gains `pay_as_you_go`, `plan_remaining`,
+  `paygo_usage`, `paygo_limit` and `summary`; `credits_remaining` is null when
+  PAYG has no cap.
+- SerpApi: Scholar results carry their citation counts again (`cited_by` is
+  read from `inline_links`). Google News no longer gets `num`/`tbs`, which that
+  engine does not take; `-f` maps to a `when:` query operator there, and news
+  dates prefer `iso_date`.
+- Extract/scrape: the Jina Reader rung runs without a Jina key (r.jina.ai
+  serves keyless requests at a lower rate limit), so URL extraction works with
+  no provider configured. A configured key is still sent.
+- Parallel: moved from `/v1beta/search` to the GA `/v1/search`. Result count,
+  excerpt size, location (now lowercase ISO alpha-2) and source policy go under
+  `advanced_settings`, as v1 requires; results now carry `publish_date`.
+  `search stats` estimates $0.001 per call (fast mode), down from $0.005.
+- Browserless: `/content` runs with `bestAttempt`, so the rung returns
+  partial renders instead of failing on a selector timeout.
+- The bare-query shorthand accepts search options on either side of the
+  query: `search "rust tokio" -p tavily -c 2` and `search -p tavily "rust
+  tokio"` now both search "rust tokio" with Tavily. Before, trailing options
+  were searched as literal text and leading ones were rejected. `search search`
+  also takes the query as bare words. After the first query word only exact
+  search options count, so operators such as `jaguar -car` or
+  `-site:pinterest.com` stay part of the query.
+- `search update --check` compares versions as semver, matching what
+  `search update` installs; a local build newer than the latest release no
+  longer reports an update.
+- Serper places results get a URL (the business website, else a Google Maps
+  link from the place's `cid`) and the address as the snippet; places items
+  carry no `link`.
+- Maintenance: Rust edition 2024 (MSRV 1.89; the opt-in stealth feature needs
+  1.98), refreshed dependencies (clears the RustSec advisories that turned CI
+  red), self_update 1.3 with SHA256SUMS verification and no interactive prompt
+  in `search update`, weekly CI with Dependabot, and an MSRV job.
 
 ## 0.10.0 — 2026-10-31
 

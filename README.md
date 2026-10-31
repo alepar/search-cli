@@ -12,10 +12,8 @@
 
 <br />
 
-[![Crates.io](https://img.shields.io/crates/v/agent-search?style=for-the-badge&logo=rust&logoColor=white&label=crates.io)](https://crates.io/crates/agent-search)
-[![Downloads](https://img.shields.io/crates/d/agent-search?style=for-the-badge&logo=rust&logoColor=white)](https://crates.io/crates/agent-search)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](LICENSE)
-[![Build](https://img.shields.io/github/actions/workflow/status/paperfoot/search-cli/ci.yml?style=for-the-badge&logo=github)](https://github.com/paperfoot/search-cli/actions)
+[![Build](https://img.shields.io/github/actions/workflow/status/alepar/search-cli/ci.yml?style=for-the-badge&logo=github)](https://github.com/alepar/search-cli/actions)
 
 ---
 
@@ -39,26 +37,23 @@ That's it — a plain `search "query"` runs a general multi-provider web search 
 
 ## Install
 
-**Cargo (recommended):**
-```bash
-cargo install agent-search
-```
-
-**Homebrew:**
-```bash
-brew tap paperfoot/tap
-brew install search-cli
-```
-
-**One-liner (macOS / Linux):**
+**One-liner (macOS / Linux x86_64, recommended):**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/alepar/search-cli/master/install.sh | sh
 ```
 
-**From source:**
+**Prebuilt binaries:** download a `search-<target>.tar.gz` from
+[GitHub Releases](https://github.com/alepar/search-cli/releases) and check it
+against the release's `SHA256SUMS`.
+
+**From source (Cargo):**
 ```bash
 cargo install --git https://github.com/alepar/search-cli
 ```
+
+The `agent-search` crate on crates.io is the upstream
+[paperfoot/search-cli](https://github.com/paperfoot/search-cli) release, not
+this fork.
 
 Binary size is ~6 MB. Startup is ~2 ms. Memory is ~5 MB. No Python, no Node, no Docker.
 
@@ -135,8 +130,8 @@ same routing registry the engine uses.
 | `patents` | Prior art, patent families | query | Serper |
 | `images` | Image search (check `image_url` fields) | query | Serper |
 | `places` | Local businesses, maps | query | Serper |
-| `extract` | Read one page as markdown, incl. JS/anti-bot | **URL** | Stealth -> Jina -> Firecrawl -> Browserless |
-| `scrape` | Alias of `extract` (identical) | **URL** | Stealth -> Jina -> Firecrawl -> Browserless |
+| `extract` | Read one page as markdown, incl. JS/anti-bot | **URL** | Stealth (opt-in build) -> Jina -> Firecrawl -> Browserless |
+| `scrape` | Alias of `extract` (identical) | **URL** | Stealth (opt-in build) -> Jina -> Firecrawl -> Browserless |
 | `similar` | "More like this page" | **URL** | Exa |
 
 ### Rank Fusion, Not Fastest-Provider-First
@@ -232,7 +227,7 @@ search "query" 2>/dev/null             # suppress diagnostics
 | **[SerpApi](https://serpapi.com/)** | Many engines: Google, Bing, YouTube, Baidu | Multi-engine coverage; only provider with a real balance API |
 | **[Perplexity](https://perplexity.ai/)** | LLM-synthesized answer with citations (Agent API, `fast` effort) | When you want an answer with sources, not raw pages |
 | **Browserless** | Cloud browser for Cloudflare/JS-heavy pages | Anti-bot bypass, pages that need a real browser |
-| **Stealth** | Built-in anti-bot scraper | Protected pages, no API key needed |
+| **Stealth** | Built-in anti-bot scraper (opt-in build, `--features stealth`) | Protected pages, no API key needed |
 | **[xAI](https://x.ai/)** | Only provider with native real-time X/Twitter search (Grok) | Live social signal, trending topics, account activity |
 
 ### Checking Credits
@@ -360,12 +355,14 @@ cargo build --release
 # Binary at target/release/search
 ```
 
-**Linux / containers:** the `stealth` scraper depends on BoringSSL, which
-doesn't link on Linux. Build without it — the extract chain simply starts at
-Jina instead of the local scraper:
+**Stealth scraper (opt-in):** the local `stealth` rung of the extract chain
+impersonates a browser's TLS fingerprint through BoringSSL. It is not built by
+default and not included in release binaries; without it the extract chain
+starts at Jina. To build it you need Rust 1.98+, cmake, clang and a C++
+compiler:
 
 ```bash
-cargo install agent-search --no-default-features
+cargo install --git https://github.com/alepar/search-cli --features stealth
 ```
 
 Prebuilt binaries ship for macOS (both architectures) and Linux x86_64; every

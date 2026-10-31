@@ -1,16 +1,20 @@
 # cargo-deny gate: advisories, licenses, and registry sources.
-# wreq/wreq-util are pre-release pins inherited from the yanked rquest crate —
-# exactly the dependency class this gate exists to watch.
+# Runs with all features, so the opt-in stealth stack (wreq, BoringSSL) is
+# covered too.
 
 [advisories]
 yanked = "deny"
 ignore = [
-    # indicatif -> number_prefix: unmaintained formatting helper, no upgrade
-    # published; cosmetic dependency (spinner), not on any network path.
-    "RUSTSEC-2025-0119",
-    # rustls-pemfile: unmaintained but frozen-format PEM parser; pulled in
-    # transitively, no patched alternative exposed by the parents yet.
-    "RUSTSEC-2025-0134",
+    # zstd 0.13 / zstd-safe 7, pulled only by wreq-util 0.2 (opt-in stealth
+    # feature, not in release binaries) for TLS certificate decompression.
+    # wreq-util's `emulation` feature hard-requires zstd ^0.13 and the fixes
+    # are in zstd 0.14 / zstd-safe 8. 0391 (encoder context reuse) and 0398
+    # (seekable API) are not on that path; 0403 (legacy-frame streaming
+    # decode) is reachable from a hostile server's certificate. Drop these
+    # once wreq-util moves to zstd 0.14.
+    "RUSTSEC-2026-0391",
+    "RUSTSEC-2026-0398",
+    "RUSTSEC-2026-0403",
 ]
 
 [licenses]
@@ -24,11 +28,7 @@ allow = [
     "MPL-2.0",
     "Zlib",
     "Unicode-3.0",
-    "OpenSSL",
     "CDLA-Permissive-2.0",
-    # wreq-util (stealth browser emulation profiles) — LGPL is acceptable for
-    # this standalone binary; revisit if the crate is ever vendored/modified.
-    "LGPL-3.0",
 ]
 
 [sources]

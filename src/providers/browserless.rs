@@ -18,7 +18,7 @@ impl Browserless {
         super::resolve_key(&self.ctx.config.keys.browserless, "BROWSERLESS_API_KEY")
     }
 
-    /// Scrape a URL using Browserless cloud browser (handles Cloudflare, JS rendering)
+    /// Scrape a URL with Browserless's cloud browser (JS rendering)
     pub async fn scrape_url(&self, url: &str) -> Result<Vec<SearchResult>, SearchError> {
         if self.api_key().is_empty() {
             return Err(SearchError::AuthMissing {
@@ -26,11 +26,14 @@ impl Browserless {
             });
         }
 
+        // bestAttempt: return what rendered if the selector wait times out,
+        // rather than failing the whole rung.
         let endpoint = "https://production-sfo.browserless.io/content";
 
         let body = serde_json::json!({
             "url": url,
-            "waitForSelector": { "selector": "body", "timeout": 10000 }
+            "waitForSelector": { "selector": "body", "timeout": 10000 },
+            "bestAttempt": true
         });
 
         let client = &self.ctx.client;
@@ -74,7 +77,7 @@ impl Browserless {
                 };
                 (title, article.text)
             }
-            _ => (url.to_string(), extract_text_simple(&resp)),
+            _ => (url.to_string(), super::html_to_text(&resp)),
         };
 
         if text.trim().is_empty() {
@@ -96,21 +99,6 @@ impl Browserless {
             extra: None,
         }])
     }
-}
-
-/// Simple HTML tag stripper
-fn extract_text_simple(html: &str) -> String {
-    let mut text = String::with_capacity(html.len() / 3);
-    let mut in_tag = false;
-    for c in html.chars() {
-        match c {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => text.push(c),
-            _ => {}
-        }
-    }
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[async_trait]

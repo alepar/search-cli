@@ -55,12 +55,14 @@ where
 /// TOML into `config_value`, the full precedence is:
 /// bare env var (e.g. `BRAVE_API_KEY`) > `SEARCH_KEYS_*` env > config file.
 pub fn resolve_key(config_value: &str, env_var: &str) -> String {
-    if let Ok(v) = std::env::var(env_var) {
-        if !v.is_empty() {
-            return v;
-        }
-    }
-    config_value.to_string()
+    pick_key(config_value, std::env::var(env_var).ok())
+}
+
+/// The precedence rule of [`resolve_key`], on an already-read env value.
+fn pick_key(config_value: &str, env_value: Option<String>) -> String {
+    env_value
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| config_value.to_string())
 }
 
 /// Turn a non-2xx reqwest response into a categorized [`SearchError`], preserving
@@ -116,23 +118,7 @@ pub fn http_error_message(status: u16, body: &str) -> String {
 /// UTC date `days` ago as `YYYY-MM-DD`, without a date-crate dependency.
 /// Used to translate the CLI's freshness words into provider date floors.
 pub fn date_days_ago(days: u64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let total_days = now.saturating_sub(days * 86400) / 86400;
-    // Howard Hinnant's civil-from-days algorithm.
-    let z = total_days as i64 + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    format!("{y:04}-{m:02}-{d:02}")
+    crate::dates::epoch_days_to_date(crate::dates::today_epoch_days().saturating_sub(days))
 }
 
 /// Days of lookback for a freshness word (day/week/month/year).
@@ -181,6 +167,40 @@ pub trait Provider: Send + Sync {
     ) -> Result<Vec<SearchResult>, SearchError>;
 }
 
+/// Last-resort HTML-to-text for scrapers when readability finds no article:
+/// drops tags and the contents of <script>/<style>, collapses whitespace.
+/// Works on chars, so multi-byte text survives intact.
+pub fn html_to_text(html: &str) -> String {
+    fn starts_with_ci(s: &str, prefix: &str) -> bool {
+        s.as_bytes()
+            .get(..prefix.len())
+            .is_some_and(|b| b.eq_ignore_ascii_case(prefix.as_bytes()))
+    }
+
+    let mut text = String::with_capacity(html.len() / 3);
+    let mut in_tag = false;
+    let mut skip_until: Option<&str> = None;
+    for (i, c) in html.char_indices() {
+        if c == '<' {
+            let rest = &html[i..];
+            match skip_until {
+                Some(end) if starts_with_ci(rest, end) => skip_until = None,
+                None if starts_with_ci(rest, "<script") => skip_until = Some("</script"),
+                None if starts_with_ci(rest, "<style") => skip_until = Some("</style"),
+                _ => {}
+            }
+            in_tag = true;
+            // Tags separate words: "<p>a</p><p>b</p>" reads "a b", not "ab".
+            text.push(' ');
+        } else if c == '>' {
+            in_tag = false;
+        } else if !in_tag && skip_until.is_none() {
+            text.push(c);
+        }
+    }
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 pub fn build_providers(ctx: &Arc<AppContext>) -> Vec<Box<dyn Provider>> {
     vec![
         Box::new(parallel::Parallel::new(ctx.clone())),
@@ -203,36 +223,45 @@ pub fn build_providers(ctx: &Arc<AppContext>) -> Vec<Box<dyn Provider>> {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_key;
+    #[test]
+    fn html_to_text_strips_tags_scripts_and_styles() {
+        let html = "<html><head><style>p{color:red}</style><SCRIPT>var a = '<b>';</SCRIPT></head>\
+                    <body><p>Hello</p><p>world</p></body></html>";
+        assert_eq!(super::html_to_text(html), "Hello world");
+    }
 
-    // Uses uniquely-named env vars so parallel tests don't race on shared state.
+    #[test]
+    fn html_to_text_keeps_multibyte_text_after_angle_bracket() {
+        // A multi-byte char right after '<' used to panic on a byte-index
+        // slice; non-ASCII text also came out as Latin-1 mojibake.
+        assert_eq!(
+            super::html_to_text("<é> naïve 日本語 <p>ok"),
+            "naïve 日本語 ok"
+        );
+        assert_eq!(super::html_to_text("<"), "");
+    }
+
+    use super::pick_key;
+
+    // Tests the precedence on values, not the process environment: setting
+    // env vars is unsafe in edition 2024 while other test threads run.
     #[test]
     fn env_var_wins_over_config() {
-        let var = "SEARCH_TEST_KEY_ENV_WINS";
-        std::env::set_var(var, "from-env");
-        assert_eq!(resolve_key("from-config", var), "from-env");
-        std::env::remove_var(var);
+        assert_eq!(pick_key("from-config", Some("from-env".into())), "from-env");
     }
 
     #[test]
     fn falls_back_to_config_when_env_unset() {
-        let var = "SEARCH_TEST_KEY_FALLBACK";
-        std::env::remove_var(var);
-        assert_eq!(resolve_key("from-config", var), "from-config");
+        assert_eq!(pick_key("from-config", None), "from-config");
     }
 
     #[test]
     fn empty_env_does_not_shadow_config() {
-        let var = "SEARCH_TEST_KEY_EMPTY";
-        std::env::set_var(var, "");
-        assert_eq!(resolve_key("from-config", var), "from-config");
-        std::env::remove_var(var);
+        assert_eq!(pick_key("from-config", Some(String::new())), "from-config");
     }
 
     #[test]
     fn empty_when_neither_set() {
-        let var = "SEARCH_TEST_KEY_NONE";
-        std::env::remove_var(var);
-        assert_eq!(resolve_key("", var), "");
+        assert_eq!(pick_key("", None), "");
     }
 }

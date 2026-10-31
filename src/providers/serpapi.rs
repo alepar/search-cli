@@ -35,18 +35,23 @@ impl SerpApi {
             });
         }
 
-        let q = augment_query(query, opts);
+        let news = engine == "google_news";
+        let q = augment_query(query, opts, news);
         let client = &self.ctx.client;
         let api_key = self.api_key().to_string();
 
         let mut params = vec![
             ("engine".to_string(), engine.to_string()),
             ("q".to_string(), q),
-            ("num".to_string(), count.to_string()),
             ("api_key".to_string(), api_key),
         ];
+        // The Google News engine takes neither `num` nor `tbs`; freshness goes
+        // into the query as a `when:` operator instead (augment_query).
+        if !news {
+            params.push(("num".to_string(), count.to_string()));
+        }
 
-        if let Some(f) = &opts.freshness {
+        if let Some(f) = opts.freshness.as_ref().filter(|_| !news) {
             let tbs = match f.as_str() {
                 "day" => "qdr:d",
                 "week" => "qdr:w",
@@ -78,7 +83,7 @@ impl SerpApi {
     }
 }
 
-fn augment_query(query: &str, opts: &SearchOpts) -> String {
+fn augment_query(query: &str, opts: &SearchOpts, news: bool) -> String {
     let mut q = query.to_string();
     for d in &opts.include_domains {
         q = format!("{q} site:{d}");
@@ -86,7 +91,26 @@ fn augment_query(query: &str, opts: &SearchOpts) -> String {
     for d in &opts.exclude_domains {
         q = format!("{q} -site:{d}");
     }
+    if let Some(when) = opts
+        .freshness
+        .as_deref()
+        .and_then(news_when)
+        .filter(|_| news)
+    {
+        q = format!("{q} when:{when}");
+    }
     q
+}
+
+/// Google News `when:` operator for a freshness window.
+fn news_when(freshness: &str) -> Option<&'static str> {
+    match freshness {
+        "day" => Some("1d"),
+        "week" => Some("7d"),
+        "month" => Some("30d"),
+        "year" => Some("1y"),
+        _ => None,
+    }
 }
 
 fn parse_results(body: &serde_json::Value, key: &str, source: &str) -> Vec<SearchResult> {
@@ -110,7 +134,12 @@ fn parse_results(body: &serde_json::Value, key: &str, source: &str) -> Vec<Searc
                         .and_then(|v| v.as_str())
                         .unwrap_or_default()
                         .to_string();
-                    let published = item.get("date").and_then(|v| v.as_str()).map(String::from);
+                    // Google News gives iso_date next to a display-format date.
+                    let published = item
+                        .get("iso_date")
+                        .or_else(|| item.get("date"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
                     let image_url = None;
 
                     // For scholar results, attach citation info as extra
@@ -119,7 +148,7 @@ fn parse_results(body: &serde_json::Value, key: &str, source: &str) -> Vec<Searc
                         if let Some(pub_info) = item.get("publication_info") {
                             map.insert("publication_info".to_string(), pub_info.clone());
                         }
-                        if let Some(cited) = item.get("cited_by") {
+                        if let Some(cited) = item.pointer("/inline_links/cited_by") {
                             map.insert("cited_by".to_string(), cited.clone());
                         }
                         if map.is_empty() {
@@ -197,5 +226,47 @@ impl SerpApi {
             .query_endpoint("google_scholar", query, count, &SearchOpts::default())
             .await?;
         Ok(parse_results(&body, "organic_results", "serpapi_scholar"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn scholar_reads_cited_by_from_inline_links() {
+        let body = json!({"organic_results": [{
+            "title": "Attention Is All You Need",
+            "link": "https://arxiv.org/abs/1706.03762",
+            "snippet": "The dominant sequence transduction models...",
+            "publication_info": {"summary": "A Vaswani - NeurIPS, 2017"},
+            "inline_links": {"cited_by": {"total": 150000, "cites_id": "2960712678066186980"}}
+        }]});
+        let r = parse_results(&body, "organic_results", "serpapi_scholar");
+        let extra = r[0].extra.as_ref().unwrap();
+        assert_eq!(extra["cited_by"]["total"], 150000);
+        assert_eq!(
+            extra["publication_info"]["summary"],
+            "A Vaswani - NeurIPS, 2017"
+        );
+    }
+
+    #[test]
+    fn news_prefers_iso_date() {
+        let body = json!({"news_results": [{"title": "t", "link": "https://e.com",
+            "date": "10/30/2026, 07:00 AM, +0000 UTC", "iso_date": "2026-10-30T07:00:00Z"}]});
+        let r = parse_results(&body, "news_results", "serpapi_news");
+        assert_eq!(r[0].published.as_deref(), Some("2026-10-30T07:00:00Z"));
+    }
+
+    #[test]
+    fn news_freshness_becomes_when_operator() {
+        let opts = SearchOpts {
+            freshness: Some("week".into()),
+            ..SearchOpts::default()
+        };
+        assert_eq!(augment_query("rust", &opts, true), "rust when:7d");
+        assert_eq!(augment_query("rust", &opts, false), "rust");
     }
 }

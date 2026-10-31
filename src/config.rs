@@ -149,10 +149,10 @@ fn tighten_config_permissions() {
     {
         use std::os::unix::fs::PermissionsExt;
         let path = config_path();
-        if let Ok(meta) = std::fs::metadata(&path) {
-            if meta.permissions().mode() & 0o077 != 0 {
-                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-            }
+        if let Ok(meta) = std::fs::metadata(&path)
+            && meta.permissions().mode() & 0o077 != 0
+        {
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
         }
     }
 }

@@ -32,13 +32,14 @@ impl Tavily {
         }
 
         let mut body = json!({
-            "api_key": self.api_key(),
             "query": query,
             "search_depth": "advanced",
             "topic": topic,
-            "max_results": count,
+            // The API accepts 0..=20.
+            "max_results": count.min(20),
             "include_answer": "basic",
             "include_raw_content": false,
+            "include_published_date": true,
         });
         if !opts.include_domains.is_empty() {
             body["include_domains"] = json!(opts.include_domains);
@@ -52,9 +53,11 @@ impl Tavily {
         }
 
         let client = &self.ctx.client;
+        let key = self.api_key();
         let resp = super::retry_request(|| async {
             let r = client
                 .post("https://api.tavily.com/search")
+                .bearer_auth(&key)
                 .json(&body)
                 .send()
                 .await?;
@@ -71,18 +74,18 @@ impl Tavily {
         let mut results = Vec::new();
 
         // Prepend the AI-generated answer if available
-        if let Some(answer) = resp.answer {
-            if !answer.is_empty() {
-                results.push(SearchResult {
-                    title: "AI Answer".to_string(),
-                    url: "tavily://answer".to_string(),
-                    snippet: answer,
-                    source: format!("{source}_answer"),
-                    published: None,
-                    image_url: None,
-                    extra: None,
-                });
-            }
+        if let Some(answer) = resp.answer
+            && !answer.is_empty()
+        {
+            results.push(SearchResult {
+                title: "AI Answer".to_string(),
+                url: "tavily://answer".to_string(),
+                snippet: answer,
+                source: format!("{source}_answer"),
+                published: None,
+                image_url: None,
+                extra: None,
+            });
         }
 
         results.extend(resp.results.into_iter().map(|r| SearchResult {
@@ -90,7 +93,7 @@ impl Tavily {
             url: r.url.unwrap_or_default(),
             snippet: r.content.unwrap_or_default(),
             source: source.to_string(),
-            published: r.published_time,
+            published: r.published_date,
             image_url: None,
             extra: r.score.map(|s| json!({"score": s})),
         }));
@@ -110,7 +113,7 @@ struct TavilyResult {
     url: Option<String>,
     content: Option<String>,
     score: Option<f64>,
-    published_time: Option<String>,
+    published_date: Option<String>,
 }
 
 #[async_trait]
@@ -147,5 +150,21 @@ impl super::Provider for Tavily {
         opts: &SearchOpts,
     ) -> Result<Vec<SearchResult>, SearchError> {
         self.do_search(query, count, "news", opts).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TavilyResponse;
+
+    #[test]
+    fn parses_published_date() {
+        let body = r#"{"answer": null, "results": [{"title": "t", "url": "https://e.com",
+            "content": "c", "score": 0.9, "published_date": "Fri, 09 Oct 2026 15:02:56 GMT"}]}"#;
+        let resp: TavilyResponse = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            resp.results[0].published_date.as_deref(),
+            Some("Fri, 09 Oct 2026 15:02:56 GMT")
+        );
     }
 }

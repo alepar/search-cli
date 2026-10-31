@@ -315,10 +315,8 @@ fn filter_warnings(active: &[String], opts: &SearchOpts) -> Vec<String> {
                 missing.join(" or ")
             ));
         }
-        if wants_domains {
-            if let Some(note) = support.note {
-                warnings.push(note.to_string());
-            }
+        if wants_domains && let Some(note) = support.note {
+            warnings.push(note.to_string());
         }
     }
     warnings
@@ -481,7 +479,8 @@ pub async fn execute_special(
             }
             if results.is_empty() {
                 let jina = providers::jina::Jina::new(ctx.clone());
-                if jina.is_configured() && provider_allowed("jina", only_providers) {
+                // Jina Reader needs no key, so this rung runs unconfigured too.
+                if provider_allowed("jina", only_providers) {
                     query_provider!("jina", jina.read_url(query), 30);
                     reject_bad_scrape(
                         "jina",

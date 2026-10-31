@@ -1,0 +1,3 @@
+# Keep the pre-2024 formatting style; the edition bump changes semantics,
+# not layout.
+style_edition = "2021"

@@ -118,33 +118,8 @@ fn build_search_body(query: &str, count: usize, opts: &SearchOpts) -> serde_json
         body["excludeDomains"] = json!(opts.exclude_domains);
     }
     // Freshness → startPublishedDate (ISO 8601)
-    if let Some(ref freshness) = opts.freshness {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let days_back: u64 = match freshness.as_str() {
-            "day" => 1,
-            "week" => 7,
-            "month" => 30,
-            "year" => 365,
-            _ => 0,
-        };
-        if days_back > 0 {
-            let target = now.saturating_sub(days_back * 86400);
-            // Format as ISO 8601: YYYY-MM-DDTHH:MM:SSZ
-            let z = (target / 86400) as i64 + 719468;
-            let era = if z >= 0 { z } else { z - 146096 } / 146097;
-            let doe = (z - era * 146097) as u64;
-            let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-            let y = yoe as i64 + era * 400;
-            let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-            let mp = (5 * doy + 2) / 153;
-            let d = doy - (153 * mp + 2) / 5 + 1;
-            let m = if mp < 10 { mp + 3 } else { mp - 9 };
-            let y = if m <= 2 { y + 1 } else { y };
-            body["startPublishedDate"] = json!(format!("{y:04}-{m:02}-{d:02}T00:00:00Z"));
-        }
+    if let Some(days) = opts.freshness.as_deref().and_then(super::freshness_days) {
+        body["startPublishedDate"] = json!(format!("{}T00:00:00Z", super::date_days_ago(days)));
     }
     body
 }
@@ -210,8 +185,50 @@ impl Exa {
         url: &str,
         count: usize,
     ) -> Result<Vec<SearchResult>, SearchError> {
+        // /findSimilar is marked deprecated in Exa's OpenAPI spec (no sunset
+        // date), which suggests /search with a query describing the source
+        // instead. Checked live (2026-10-31): /search with the URL as query
+        // returns pages about the same site rather than similar sites, so
+        // this stays on /findSimilar until Exa removes it or ships a
+        // like-for-like replacement.
         let body = json!({ "url": url, "numResults": count, "contents": { "text": true } });
         let resp = self.post_api("findSimilar", body).await?;
         Ok(to_results(resp, "exa_similar"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn highlights_preferred_over_text() {
+        let resp: ExaResponse = serde_json::from_value(json!({"results": [
+            {"title": "a", "url": "https://a.com", "text": "full", "highlights": ["h1", "h2"],
+             "publishedDate": "2026-10-01T00:00:00.000Z"},
+            {"title": "b", "url": "https://b.com", "text": "full b", "highlights": []}
+        ]}))
+        .unwrap();
+        let r = to_results(resp, "exa");
+        assert_eq!(r[0].snippet, "h1 ... h2");
+        assert_eq!(r[0].published.as_deref(), Some("2026-10-01T00:00:00.000Z"));
+        assert_eq!(r[1].snippet, "full b");
+    }
+
+    #[test]
+    fn search_body_filters() {
+        let opts = SearchOpts {
+            include_domains: vec!["arxiv.org".into()],
+            freshness: Some("week".into()),
+            ..SearchOpts::default()
+        };
+        let body = build_search_body("rust", 5, &opts);
+        assert_eq!(body["numResults"], 5);
+        assert_eq!(body["includeDomains"], json!(["arxiv.org"]));
+        let start = body["startPublishedDate"].as_str().unwrap();
+        assert!(
+            start.ends_with("T00:00:00Z") && start.len() == 20,
+            "{start}"
+        );
     }
 }
