@@ -361,6 +361,11 @@ fn estimates_by_month(entries: &[Value]) -> BTreeMap<String, BTreeMap<String, f6
                 .or_default() += stats::estimated_cost_per_call(base);
         }
     }
+    for months in out.values_mut() {
+        for v in months.values_mut() {
+            *v = stats::round_usd(*v);
+        }
+    }
     out
 }
 
@@ -791,6 +796,18 @@ mod tests {
         let per_call = stats::estimated_cost_per_call("brave");
         assert!((brave["2026-09"] - 2.0 * per_call).abs() < 1e-12);
         assert!((brave["2026-10"] - per_call).abs() < 1e-12);
+    }
+
+    #[test]
+    fn estimates_carry_no_float_noise() {
+        let ts = dates::days_from_civil(2026, 10, 1) as u64 * 86400;
+        let entries: Vec<Value> = (0..35)
+            .map(|_| json!({"ts": ts, "providers_queried": ["brave"]}))
+            .collect();
+        let v = estimates_by_month(&entries)["brave"]["2026-10"];
+        assert_eq!(v, stats::round_usd(v));
+        assert_eq!(v.to_string().len(), stats::round_usd(v).to_string().len());
+        assert!(v.to_string().len() <= 10, "{v}");
     }
 
     #[test]

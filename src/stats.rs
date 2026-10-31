@@ -10,6 +10,12 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 /// Rough per-call cost estimates in USD, from provider pricing pages
 /// (2026-07). Estimates only — `search usage` balance snapshots are ground
 /// truth where available. Keyed by base provider name.
+/// Round a summed USD estimate to a micro-dollar, below any per-call
+/// price, so float accumulation noise (0.17500000000000007) never shows.
+pub(crate) fn round_usd(v: f64) -> f64 {
+    (v * 1e6).round() / 1e6
+}
+
 pub(crate) fn estimated_cost_per_call(provider: &str) -> f64 {
     match provider {
         "serper" => 0.001,
@@ -193,7 +199,11 @@ fn aggregate(
         }
     }
 
-    let estimated_total_spend_usd = by_provider.values().map(|p| p.estimated_spend_usd).sum();
+    for p in by_provider.values_mut() {
+        p.estimated_spend_usd = round_usd(p.estimated_spend_usd);
+    }
+    let estimated_total_spend_usd =
+        round_usd(by_provider.values().map(|p| p.estimated_spend_usd).sum());
 
     let mut top_queries: Vec<(String, u64)> = query_counts.into_iter().collect();
     top_queries.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
