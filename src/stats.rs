@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 /// Rough per-call cost estimates in USD, from provider pricing pages
 /// (2026-07). Estimates only — `search usage` balance snapshots are ground
 /// truth where available. Keyed by base provider name.
-fn estimated_cost_per_call(provider: &str) -> f64 {
+pub(crate) fn estimated_cost_per_call(provider: &str) -> f64 {
     match provider {
         "serper" => 0.001,
         "jina" => 0.0005,
@@ -35,7 +35,7 @@ fn estimated_cost_per_call(provider: &str) -> f64 {
 }
 
 /// "brave_llm_context" bills as brave; "perplexity_fast" as perplexity.
-fn base_provider(name: &str) -> &str {
+pub(crate) fn base_provider(name: &str) -> &str {
     name.split('_').next().unwrap_or(name)
 }
 
@@ -82,7 +82,7 @@ fn now_secs() -> u64 {
 }
 
 /// Every log line in the window, oldest first.
-fn read_entries(days: u64) -> (Vec<serde_json::Value>, u64) {
+pub(crate) fn read_entries(days: u64) -> (Vec<serde_json::Value>, u64) {
     let cutoff = now_secs().saturating_sub(days * 86400);
     let mut entries = Vec::new();
     let mut files = 0u64;

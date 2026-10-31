@@ -18,6 +18,17 @@
   off by default, warns on every use. While unset, index copies carry
   `extra.reader_hint` so agents can offer the opt-in. The query cache keys
   extract results on this setting.
+- New `search billing`: monthly usage per provider for the last six UTC
+  calendar months, newest first, in each provider's native unit. Jina
+  (tokens), Firecrawl (credits) and xAI (USD, management key) report real
+  monthly history; Tavily (credits) and SerpApi (searches) fill the current
+  month from their current billing cycle (marked `*`); everything else is
+  estimated in USD from the local search logs (marked `~`), and months
+  before the oldest log show `-`. JSON tags every cell with its `source`
+  (`api`, `api_current_period`, `estimate`, `none`).
+- `search usage` now reports Serper's credit balance (`/account`) and
+  Jina's token wallet (Jina API-dashboard backend, not in Jina's public
+  docs).
 - extract/scrape: papers are read by identifier instead of through
   publisher pages, which sit behind bot walls and robots rules naming AI
   agents. A DOI (doi.org or embedded in a publisher URL or query), arXiv id,

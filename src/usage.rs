@@ -13,7 +13,7 @@ use std::time::Duration;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 
-const USAGE_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const USAGE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Serialize)]
 pub struct ProviderUsage {
@@ -48,7 +48,7 @@ fn transport_error(e: reqwest::Error) -> String {
     redact_secrets(&e.to_string())
 }
 
-async fn get_json(
+pub(crate) async fn get_json(
     ctx: &AppContext,
     url: &str,
     bearer: Option<&str>,
@@ -61,6 +61,13 @@ async fn get_json(
     if let Some((k, v)) = header {
         req = req.header(k, v);
     }
+    send_json(req).await
+}
+
+/// Send a request and parse a JSON body; non-2xx becomes an error carrying
+/// the status and a short whitespace-collapsed excerpt of the body. All error
+/// text is redacted.
+pub(crate) async fn send_json(req: reqwest::RequestBuilder) -> Result<serde_json::Value, String> {
     let resp = req.send().await.map_err(transport_error)?;
     let status = resp.status();
     if !status.is_success() {
@@ -252,14 +259,53 @@ async fn linkup_usage(ctx: &AppContext, key: String) -> Result<serde_json::Value
     }))
 }
 
+/// Serper: GET https://google.serper.dev/account (X-API-KEY) -> { balance, rateLimit }.
+async fn serper_usage(ctx: &AppContext, key: String) -> Result<serde_json::Value, String> {
+    let v = get_json(
+        ctx,
+        "https://google.serper.dev/account",
+        None,
+        Some(("X-API-KEY", &key)),
+    )
+    .await?;
+    Ok(serper_usage_from(&v))
+}
+
+fn serper_usage_from(v: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "credits_remaining": v.get("balance").cloned(),
+        "rate_limit": v.get("rateLimit").cloned(),
+        "unit": "credits",
+    })
+}
+
+/// Jina: the API dashboard's backend (embeddings-dashboard-api.jina.ai, not
+/// in Jina's public docs) reports the key's token wallet. Only the balance
+/// is kept; the response also carries account details we have no use for.
+async fn jina_usage(ctx: &AppContext, key: String) -> Result<serde_json::Value, String> {
+    let url = format!("{JINA_DASHBOARD}/api/v1/api_key/user?api_key={key}");
+    let v = get_json(ctx, &url, None, None).await?;
+    Ok(jina_usage_from(&v))
+}
+
+pub(crate) const JINA_DASHBOARD: &str = "https://embeddings-dashboard-api.jina.ai";
+
+fn jina_usage_from(v: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "credits_remaining": v.get("wallet").and_then(|w| w.get("total_balance")).cloned(),
+        "unit": "tokens",
+    })
+}
+
 /// Fetch usage for every provider, concurrently. Providers without a usage
 /// API come back `supported: false`; unconfigured ones are skipped for
 /// network calls but still listed.
-/// Confirmed no supported balance API (dashboard-only) as of 2026-07:
-/// perplexity (re-checked 2026-10: no balance endpoint for API keys),
-/// serper, parallel, browserless, jina. Kagi API v1 (2026-10)
-/// reports no balance in responses and has no balance endpoint. Exa exposes only
-/// cost-over-time per key id (no remaining balance) — not wired up.
+/// Confirmed no supported balance API (dashboard-only) as of 2026-10:
+/// perplexity (no balance endpoint for API keys), browserless, and parallel
+/// (its balance endpoint needs an OAuth account token, not the API key).
+/// Kagi API v1 reports no balance in responses and has no balance endpoint.
+/// Exa exposes only cost-over-time per key id behind a separate service key
+/// (no remaining balance) — not wired up.
 pub async fn collect(ctx: Arc<AppContext>) -> Vec<ProviderUsage> {
     type UsageFetch = fn(
         &AppContext,
@@ -277,6 +323,8 @@ pub async fn collect(ctx: Arc<AppContext>) -> Vec<ProviderUsage> {
             "xai" => Some(|ctx, key| Box::pin(xai_usage(ctx, key))),
             "tavily" => Some(|ctx, key| Box::pin(tavily_usage(ctx, key))),
             "linkup" => Some(|ctx, key| Box::pin(linkup_usage(ctx, key))),
+            "serper" => Some(|ctx, key| Box::pin(serper_usage(ctx, key))),
+            "jina" => Some(|ctx, key| Box::pin(jina_usage(ctx, key))),
             _ => None,
         }
     }
@@ -353,7 +401,7 @@ pub async fn collect(ctx: Arc<AppContext>) -> Vec<ProviderUsage> {
 
 /// Resolve the API key for a provider by name, mirroring each provider's own
 /// env > config precedence.
-fn resolve_provider_key(ctx: &AppContext, name: &str) -> String {
+pub(crate) fn resolve_provider_key(ctx: &AppContext, name: &str) -> String {
     let k = &ctx.config.keys;
     match name {
         "serpapi" => providers::resolve_key(&k.serpapi, "SERPAPI_API_KEY"),
@@ -375,7 +423,7 @@ fn resolve_provider_key(ctx: &AppContext, name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::tavily_usage_from;
+    use super::{jina_usage_from, serper_usage_from, tavily_usage_from};
     use serde_json::json;
 
     #[test]
@@ -407,5 +455,22 @@ mod tests {
         assert_eq!(u["pay_as_you_go"], false);
         assert_eq!(u["credits_remaining"], 750.0);
         assert!(u.get("summary").is_none());
+    }
+
+    #[test]
+    fn serper_balance() {
+        let u = serper_usage_from(&json!({"balance": 49957, "rateLimit": 50}));
+        assert_eq!(u["credits_remaining"], 49957);
+        assert_eq!(u["unit"], "credits");
+    }
+
+    #[test]
+    fn jina_balance_keeps_only_the_wallet_total() {
+        let v = json!({"user_id": "u", "email": "someone@example.com",
+            "wallet": {"regular_balance": 747633454, "total_balance": 747633454}});
+        let u = jina_usage_from(&v);
+        assert_eq!(u["credits_remaining"], 747633454);
+        assert_eq!(u["unit"], "tokens");
+        assert!(u.get("email").is_none());
     }
 }

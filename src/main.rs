@@ -1,4 +1,5 @@
 mod auth;
+mod billing;
 mod cache;
 mod cli;
 mod config;
@@ -805,7 +806,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 "name": "search",
                 "version": env!("CARGO_PKG_VERSION"),
                 "description": env!("CARGO_PKG_DESCRIPTION"),
-                "commands": ["search", "verify", "usage", "doctor", "stats", "cache clear", "config show", "config set", "config check", "config path", "agent-info", "providers", "skill install", "skill status", "update"],
+                "commands": ["search", "verify", "usage", "billing", "doctor", "stats", "cache clear", "config show", "config set", "config check", "config path", "agent-info", "providers", "skill install", "skill status", "update"],
                 "command_schemas": {
                     "search": {
                         "description": "Search across providers",
@@ -873,6 +874,11 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                     },
                     "usage": {
                         "description": "Remaining credits/quota for providers that expose a usage API (informational; never disables a provider). Each run snapshots balances for `search stats`.",
+                        "args": [],
+                        "options": []
+                    },
+                    "billing": {
+                        "description": "Monthly usage per provider for the last 6 UTC calendar months, newest first. Each cell carries its source: `api` (provider usage history: jina tokens, firecrawl credits, xai USD), `api_current_period` (current billing cycle only: tavily credits, serpapi searches), `estimate` (USD from local search logs), or `none`. Native units; never converted.",
                         "args": [],
                         "options": []
                     },
@@ -1057,6 +1063,22 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                         );
                     }
                 }
+            }
+            Ok(0)
+        }
+
+        Commands::Billing => {
+            let report = billing::collect(app).await;
+            if ctx.is_json() {
+                output::json::render_value(&serde_json::json!({
+                    "version": types::ENVELOPE_VERSION,
+                    "status": "success",
+                    "months": report.months,
+                    "estimates_since": report.estimates_since,
+                    "providers": report.providers,
+                }));
+            } else if !ctx.suppress_human() {
+                billing::render_human(&report);
             }
             Ok(0)
         }
