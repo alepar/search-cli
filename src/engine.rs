@@ -2,6 +2,7 @@ use crate::context::AppContext;
 use crate::errors::SearchError;
 use crate::providers::{self, Provider};
 use crate::registry;
+use crate::sanctioned;
 use crate::types::{
     Answer, FailureCategory, Mode, ProviderFailure, ResponseMetadata, ResponseStatus, SearchOpts,
     SearchResponse, SearchResult, ENVELOPE_VERSION,
@@ -459,65 +460,89 @@ pub async fn execute_special(
             }
         }
         Mode::Scrape | Mode::Extract => {
-            // Try Stealth (local) first, then Jina reader, Firecrawl, Browserless.
-            // After each attempt, walls (binary bytes, anti-bot challenges,
-            // login walls, empty JS shells) are demoted to a failure so the
-            // chain keeps escalating: a scraper "succeeding" with a login
-            // form must not stop the fallback.
-            #[cfg(feature = "stealth")]
-            {
-                let stealth = providers::stealth::Stealth::new(ctx.clone());
-                if provider_allowed("stealth", only_providers) {
-                    query_provider!("stealth", stealth.scrape_url(query), 30);
-                    reject_bad_scrape(
-                        "stealth",
-                        &mut results,
-                        &mut providers_failed,
-                        &mut provider_failures,
-                        &mut provider_results,
-                    );
-                }
+            // A sanctioned route (API, feed, public preview) for the URL's site
+            // runs first. Unless the route opts into fallback, its answer is
+            // final: scraping a walled site only collects block pages.
+            let mut run_chain = true;
+            let routes = sanctioned::routes(ctx.clone());
+            let route = url::Url::parse(query)
+                .ok()
+                .and_then(|u| sanctioned::find(&routes, &u).map(|r| (r, u)))
+                .filter(|(r, _)| provider_allowed(r.name(), only_providers));
+            if let Some((route, url)) = route {
+                let name = route.name();
+                providers_queried.push(name.to_string());
+                record_result(
+                    timeout(Duration::from_secs(60), route.fetch(&url)).await,
+                    name,
+                    &mut results,
+                    &mut providers_failed,
+                    &mut provider_failures,
+                    &mut provider_results,
+                );
+                run_chain = results.is_empty() && route.fallback_to_chain();
             }
-            if results.is_empty() {
-                let jina = providers::jina::Jina::new(ctx.clone());
-                // Jina Reader needs no key, so this rung runs unconfigured too.
-                if provider_allowed("jina", only_providers) {
-                    query_provider!("jina", jina.read_url(query), 30);
-                    reject_bad_scrape(
-                        "jina",
-                        &mut results,
-                        &mut providers_failed,
-                        &mut provider_failures,
-                        &mut provider_results,
-                    );
+            if run_chain {
+                // Try Stealth (local) first, then Jina reader, Firecrawl, Browserless.
+                // After each attempt, walls (binary bytes, anti-bot challenges,
+                // login walls, empty JS shells) are demoted to a failure so the
+                // chain keeps escalating: a scraper "succeeding" with a login
+                // form must not stop the fallback.
+                #[cfg(feature = "stealth")]
+                {
+                    let stealth = providers::stealth::Stealth::new(ctx.clone());
+                    if provider_allowed("stealth", only_providers) {
+                        query_provider!("stealth", stealth.scrape_url(query), 30);
+                        reject_bad_scrape(
+                            "stealth",
+                            &mut results,
+                            &mut providers_failed,
+                            &mut provider_failures,
+                            &mut provider_results,
+                        );
+                    }
                 }
-            }
-            if results.is_empty() {
-                let fc = providers::firecrawl::Firecrawl::new(ctx.clone());
-                if fc.is_configured() && provider_allowed("firecrawl", only_providers) {
-                    query_provider!("firecrawl", fc.scrape_url(query), 30);
-                    reject_bad_scrape(
-                        "firecrawl",
-                        &mut results,
-                        &mut providers_failed,
-                        &mut provider_failures,
-                        &mut provider_results,
-                    );
+                if results.is_empty() {
+                    let jina = providers::jina::Jina::new(ctx.clone());
+                    // Jina Reader needs no key, so this rung runs unconfigured too.
+                    if provider_allowed("jina", only_providers) {
+                        query_provider!("jina", jina.read_url(query), 30);
+                        reject_bad_scrape(
+                            "jina",
+                            &mut results,
+                            &mut providers_failed,
+                            &mut provider_failures,
+                            &mut provider_results,
+                        );
+                    }
                 }
-            }
-            // Last resort: Browserless cloud browser (JS rendering). A wall
-            // from it is still reported as a wall: a login form is not the page.
-            if results.is_empty() {
-                let bl = providers::browserless::Browserless::new(ctx.clone());
-                if bl.is_configured() && provider_allowed("browserless", only_providers) {
-                    query_provider!("browserless", bl.scrape_url(query), 30);
-                    reject_bad_scrape(
-                        "browserless",
-                        &mut results,
-                        &mut providers_failed,
-                        &mut provider_failures,
-                        &mut provider_results,
-                    );
+                if results.is_empty() {
+                    let fc = providers::firecrawl::Firecrawl::new(ctx.clone());
+                    if fc.is_configured() && provider_allowed("firecrawl", only_providers) {
+                        query_provider!("firecrawl", fc.scrape_url(query), 30);
+                        reject_bad_scrape(
+                            "firecrawl",
+                            &mut results,
+                            &mut providers_failed,
+                            &mut provider_failures,
+                            &mut provider_results,
+                        );
+                    }
+                }
+                // Last resort: Browserless cloud browser (JS rendering). A wall
+                // from it is still reported as a wall: a login form is not the page.
+                if results.is_empty() {
+                    let bl = providers::browserless::Browserless::new(ctx.clone());
+                    if bl.is_configured() && provider_allowed("browserless", only_providers) {
+                        query_provider!("browserless", bl.scrape_url(query), 30);
+                        reject_bad_scrape(
+                            "browserless",
+                            &mut results,
+                            &mut providers_failed,
+                            &mut provider_failures,
+                            &mut provider_results,
+                        );
+                    }
                 }
             }
         }

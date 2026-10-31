@@ -12,6 +12,7 @@ mod logging;
 mod output;
 mod providers;
 mod registry;
+mod sanctioned;
 mod stats;
 mod types;
 mod usage;

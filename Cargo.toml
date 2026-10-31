@@ -47,6 +47,7 @@ wreq = { version = "0.16.3", features = ["json", "cookies", "gzip", "brotli", "d
 wreq-util = { version = "0.2.0", optional = true }
 hickory-resolver = { version = "0.26", features = ["tokio"] }
 readability = { version = "0.3", default-features = false }
+roxmltree = "0.21.2"
 
 [dev-dependencies]
 assert_cmd = "2"

@@ -80,9 +80,13 @@ const BOT_MARKERS: &[&str] = &[
     "client challenge",
     "request unsuccessful. incapsula",
     "please verify you are a human",
-    // Site-specific block pages
+    // Site-specific block pages (Reddit, Quora, Glassdoor, Google)
     "blocked by network security",
     "you've been blocked",
+    "you have been blocked",
+    "blocked in error",
+    "mistakenly blocked",
+    "detected unusual traffic",
 ];
 
 /// A page this short is not an extraction, whatever it says.
@@ -105,14 +109,17 @@ pub fn classify_content(content: &str) -> Option<Wall> {
         }
     }
 
-    let len = content.trim().chars().count();
+    // Reader output is markdown: link targets are not visible text, and on
+    // a login page they can be most of the bytes.
+    let visible = strip_link_targets(content);
+    let len = visible.trim().chars().count();
     if len < SHELL_MAX_CHARS {
         return Some(Wall::JsShell);
     }
     if len >= BOT_MAX_CHARS {
         return None;
     }
-    let lower = content.to_lowercase();
+    let lower = visible.to_lowercase();
     if BOT_MARKERS.iter().any(|m| lower.contains(m)) {
         return Some(Wall::Bot);
     }
@@ -120,6 +127,25 @@ pub fn classify_content(content: &str) -> Option<Wall> {
         return Some(Wall::Login);
     }
     None
+}
+
+/// Drop markdown link and image targets: "[text](https://...)" -> "[text]".
+fn strip_link_targets(md: &str) -> String {
+    let mut out = String::with_capacity(md.len());
+    let mut rest = md;
+    while let Some(i) = rest.find("](") {
+        out.push_str(&rest[..=i]);
+        let after = &rest[i + 2..];
+        match after.find(')') {
+            Some(close) => rest = &after[close + 1..],
+            None => {
+                rest = after;
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 fn is_login_wall(lower: &str) -> bool {
@@ -144,6 +170,35 @@ fn is_login_wall(lower: &str) -> bool {
         ]
         .iter()
         .any(|m| lower.contains(m))
+}
+
+/// Classify an HTTP response by status and headers, before reading the body.
+/// `header` returns a header's value by lowercase name (for `set-cookie`, any
+/// one of them joined is fine).
+pub fn classify_response(status: u16, header: impl Fn(&str) -> Option<String>) -> Option<Wall> {
+    let has = |name: &str, needle: &str| {
+        header(name).is_some_and(|v| v.to_ascii_lowercase().contains(needle))
+    };
+    if has("cf-mitigated", "challenge") || has("x-amzn-waf-action", "") {
+        return Some(Wall::Bot);
+    }
+    if status == 999 {
+        // LinkedIn's non-standard "go away" status.
+        return Some(Wall::Login);
+    }
+    if !matches!(status, 401 | 403 | 405 | 429 | 503) {
+        return None;
+    }
+    if header("x-datadome").is_some()
+        || has("server", "datadome")
+        || has("set-cookie", "_px")
+        || has("server", "akamaighost")
+        || has("server", "cloudflare")
+        || has("x-iinfo", "")
+    {
+        return Some(Wall::Bot);
+    }
+    None
 }
 
 #[cfg(test)]
@@ -198,6 +253,16 @@ mod tests {
     }
 
     #[test]
+    fn link_targets_do_not_count_as_text() {
+        let links = "[Privacy](https://example.com/a-very-long-tracking-url?x=1) ".repeat(80);
+        let page =
+            format!("Agree & Join LinkedIn. Sign in. [Forgot password?](https://x/y) {links}");
+        assert!(page.len() > 4000);
+        assert_eq!(classify_content(&page), Some(Wall::Login));
+        assert_eq!(strip_link_targets("a [b](c) d ![e](f)"), "a [b] d ![e]");
+    }
+
+    #[test]
     fn shells_are_detected() {
         assert_eq!(classify_content("reddit"), Some(Wall::JsShell));
         assert_eq!(classify_content("   \n  "), Some(Wall::JsShell));
@@ -213,5 +278,24 @@ mod tests {
         // A long page with a "Log in" link in its nav is still content.
         let with_nav = format!("Log in Sign up {}", prose(120));
         assert_eq!(classify_content(&with_nav), None);
+    }
+
+    #[test]
+    fn response_headers_identify_walls() {
+        let none = |_: &str| None;
+        assert_eq!(classify_response(200, none), None);
+        assert_eq!(classify_response(404, none), None);
+        assert_eq!(classify_response(403, none), None);
+        assert_eq!(classify_response(999, none), Some(Wall::Login));
+
+        let cf = |n: &str| (n == "cf-mitigated").then(|| "challenge".to_string());
+        assert_eq!(classify_response(403, cf), Some(Wall::Bot));
+        let waf = |n: &str| (n == "x-amzn-waf-action").then(|| "challenge".to_string());
+        assert_eq!(classify_response(202, waf), Some(Wall::Bot));
+        let dd = |n: &str| (n == "x-datadome").then(|| "protected".to_string());
+        assert_eq!(classify_response(403, dd), Some(Wall::Bot));
+        assert_eq!(classify_response(200, dd), None);
+        let px = |n: &str| (n == "set-cookie").then(|| "_pxhd=abc; path=/".to_string());
+        assert_eq!(classify_response(403, px), Some(Wall::Bot));
     }
 }
