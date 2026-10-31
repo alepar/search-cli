@@ -458,6 +458,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                     "browserless",
                     "stealth",
                     "xai",
+                    "reddit",
                 ];
                 for p in providers {
                     if !KNOWN.iter().any(|k| k.eq_ignore_ascii_case(p)) {
@@ -805,11 +806,11 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                         ],
                         "options": [
                             {"name": "-m/--mode", "type": "string", "required": false, "default": "general",
-                             "values": ["general","news","academic","people","deep","extract","similar","scrape","scholar","patents","images","places","social"],
+                             "values": ["general","news","academic","people","deep","extract","similar","scrape","scholar","patents","images","places","social","reddit"],
                              "description": "Search mode — chosen explicitly by the caller; the CLI does NOT infer intent from the query"},
                             {"name": "-c/--count", "type": "integer", "required": false, "description": "Number of results"},
                             {"name": "-p/--providers", "type": "string[]", "required": false,
-                             "values": ["parallel","brave","serper","exa","jina","linkup","kagi","firecrawl","tavily","serpapi","perplexity","browserless","stealth","xai"],
+                             "values": ["parallel","brave","serper","exa","jina","linkup","kagi","firecrawl","tavily","serpapi","perplexity","browserless","stealth","xai","reddit"],
                              "description": "Comma-separated provider list"},
                             {"name": "-d/--domain", "type": "string[]", "required": false, "description": "Include only these domains"},
                             {"name": "--exclude-domain", "type": "string[]", "required": false, "description": "Exclude these domains"},

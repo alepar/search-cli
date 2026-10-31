@@ -15,6 +15,7 @@ use url::Url;
 mod github;
 mod hackernews;
 mod medium;
+mod reddit;
 mod scholarly;
 mod stackexchange;
 mod telegram;
@@ -42,6 +43,7 @@ pub fn routes(ctx: Arc<AppContext>) -> Vec<Box<dyn Route>> {
         Box::new(hackernews::HackerNews::new(ctx.clone())),
         Box::new(medium::Medium::new(ctx.clone())),
         Box::new(telegram::Telegram::new(ctx.clone())),
+        Box::new(crate::providers::reddit::Reddit::new(ctx.clone())),
         Box::new(youtube::YouTube::new(ctx.clone())),
         Box::new(scholarly::Scholarly::new(ctx)),
         Box::new(walled::Walled),
@@ -315,6 +317,13 @@ mod tests {
             Some("scholarly")
         );
         assert_eq!(name("https://arxiv.org/abs/1706.03762"), Some("scholarly"));
+        assert_eq!(
+            name("https://old.reddit.com/r/rust/comments/i5hppj/smol/"),
+            Some("reddit")
+        );
+        // Every reddit.com page is Reddit's: non-thread pages get a clear
+        // no_sanctioned_route from the route, never the scraper chain.
+        assert_eq!(name("https://www.reddit.com/r/rust/"), Some("reddit"));
         assert_eq!(name("https://www.linkedin.com/in/someone"), Some("walled"));
         assert_eq!(name("https://en.wikipedia.org/wiki/Rust"), None);
         // Paths a route cannot serve fall through to the chain.

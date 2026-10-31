@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- New `reddit` mode: Reddit threads fused across Perplexity's Search API,
+  Serper, Kagi, Tavily and Brave, scoped to reddit.com. Thread URLs only, one
+  canonical URL per thread (`extra.post_id`, `subreddit`, `comment_id`).
+  Perplexity results carry indexed post and comment text.
+- `extract`/`scrape` on a reddit.com or redd.it thread URL returns the
+  thread's indexed copy from the Perplexity Search API (source `reddit`,
+  `extra.copy: "search_index"`, `extra.complete: false`) instead of running
+  the scraper chain, which only collects Reddit's block pages. Non-thread
+  URLs and threads no index holds fail with `no_sanctioned_route` (category
+  `blocked`). reddit.com itself is never requested.
 - extract/scrape: papers are read by identifier instead of through
   publisher pages, which sit behind bot walls and robots rules naming AI
   agents. A DOI (doi.org or embedded in a publisher URL or query), arXiv id,

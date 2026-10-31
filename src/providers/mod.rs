@@ -7,6 +7,7 @@ pub mod kagi;
 pub mod linkup;
 pub mod parallel;
 pub mod perplexity;
+pub mod reddit;
 pub mod serpapi;
 pub mod serper;
 #[cfg(feature = "stealth")]

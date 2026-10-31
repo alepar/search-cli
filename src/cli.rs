@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
     name = "search",
     version,
     about = "Agent-friendly multi-provider search CLI",
-    long_about = "Aggregates 14 search providers across 13 explicit search modes.\n\
+    long_about = "Aggregates 14 search providers across 14 explicit search modes.\n\
         You choose the mode (-m) and/or providers (-p); the CLI does not guess\n\
         intent. Run `search agent-info` for the machine-readable capability map.\n\
         Outputs colored tables for humans, JSON when piped to other tools.\n\n\
@@ -24,13 +24,15 @@ use clap::{Parser, Subcommand};
           perplexity LLM-synthesized answer with citations (Agent API)\n  \
           browserless Cloud browser for Cloudflare/JS-heavy pages\n  \
           stealth    Local anti-bot scraper (no API key; opt-in build feature)\n  \
-          xai        Only real-time X/Twitter search (Grok agentic)\n\n\
+          xai        Only real-time X/Twitter search (Grok agentic)\n  \
+          reddit     Reddit thread reader for extract (indexed copies only)\n\n\
         EXAMPLES:\n  \
           search \"rust error handling\"                    # general web search\n  \
           search search -q \"CRISPR\" -m academic           # academic papers\n  \
           search search -q \"CEO of Stripe\" -m people      # LinkedIn profiles via Exa\n  \
           search search -q \"AI news\" -m news              # breaking news\n  \
           search search -q \"trending on twitter\" -m social # X/Twitter search\n  \
+          search search -q \"tokio vs smol\" -m reddit     # Reddit threads\n  \
           search search -q \"query\" -p exa                 # force Exa only\n  \
           search search -q \"query\" -p exa,brave           # only Exa + Brave\n  \
           search --x \"AI agents\"                          # search X (Twitter) only\n  \
@@ -175,8 +177,8 @@ pub struct SearchArgs {
     pub words: Vec<String>,
 
     /// Search mode (default: general). Choose explicitly: general, news,
-    /// academic, deep, social, scholar, patents, people, places, images,
-    /// similar, scrape, extract. See `search agent-info` for the full map.
+    /// academic, deep, social, reddit, scholar, patents, people, places,
+    /// images, similar, scrape, extract. See `search agent-info` for the full map.
     #[arg(short, long, value_enum, default_value = "general")]
     pub mode: Mode,
 
@@ -184,7 +186,7 @@ pub struct SearchArgs {
     #[arg(short, long)]
     pub count: Option<usize>,
 
-    /// Use only specific providers (comma-separated: parallel,brave,serper,exa,jina,linkup,kagi,firecrawl,tavily,serpapi,perplexity,browserless,stealth,xai)
+    /// Use only specific providers (comma-separated: parallel,brave,serper,exa,jina,linkup,kagi,firecrawl,tavily,serpapi,perplexity,browserless,stealth,xai,reddit)
     #[arg(short, long, value_delimiter = ',')]
     pub providers: Option<Vec<String>>,
 
