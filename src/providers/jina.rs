@@ -126,19 +126,20 @@ impl super::Provider for Jina {
 }
 
 impl Jina {
+    /// Jina Reader. Works without a key (at a lower rate limit), so the
+    /// extract chain has a remote rung even when no provider is configured;
+    /// a configured key is sent for the higher limit.
     pub async fn read_url(&self, url: &str) -> Result<Vec<SearchResult>, SearchError> {
-        if self.api_key().is_empty() {
-            return Err(SearchError::AuthMissing { provider: "jina" });
-        }
-
         let reader_url = format!("https://r.jina.ai/{url}");
         let client = &self.ctx.client;
-        let auth = format!("Bearer {}", self.api_key());
+        let key = self.api_key();
 
         super::retry_request(|| async {
-            let resp = client
-                .get(&reader_url)
-                .header("Authorization", &auth)
+            let mut req = client.get(&reader_url);
+            if !key.is_empty() {
+                req = req.bearer_auth(&key);
+            }
+            let resp = req
                 .header("Accept", "application/json")
                 .header("X-Retain-Images", "none")
                 .send()

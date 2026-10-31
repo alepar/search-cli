@@ -49,6 +49,9 @@
   read from `inline_links`). Google News no longer gets `num`/`tbs`, which that
   engine does not take; `-f` maps to a `when:` query operator there, and news
   dates prefer `iso_date`.
+- Extract/scrape: the Jina Reader rung runs without a Jina key (r.jina.ai
+  serves keyless requests at a lower rate limit), so URL extraction works with
+  no provider configured. A configured key is still sent.
 
 ## 0.10.0 — 2026-10-31
 
