@@ -1363,7 +1363,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                         } else {
                             eprintln!("Update failed: {e}");
                             eprintln!(
-                                "You can update manually: cargo install agent-search --locked"
+                                "You can update manually: cargo install --git https://github.com/alepar/search-cli --locked"
                             );
                         }
                         Ok(err.exit_code())

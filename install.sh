@@ -48,7 +48,7 @@ curl -fsSL "$URL" -o "${TMPDIR}/search.tar.gz"
 SUMS_URL="https://github.com/${REPO}/releases/download/${LATEST}/SHA256SUMS"
 if ! curl -fsSL "$SUMS_URL" -o "${TMPDIR}/SHA256SUMS"; then
   echo "Release ${LATEST} has no SHA256SUMS file; refusing unverified install."
-  echo "Install from source instead: cargo install agent-search"
+  echo "Install from source instead: cargo install --git https://github.com/${REPO}"
   rm -rf "$TMPDIR"
   exit 1
 fi
