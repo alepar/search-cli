@@ -120,8 +120,8 @@ fn build_x_search_config(opts: &SearchOpts) -> Option<serde_json::Value> {
         config.insert("excluded_x_handles".to_string(), json!(excluded));
     }
 
-    if let Some(days_back) = opts.freshness.as_deref().and_then(freshness_days) {
-        let (from, to) = date_range(today_epoch_days(), days_back);
+    if let Some(days_back) = opts.freshness.as_deref().and_then(super::freshness_days) {
+        let (from, to) = date_range(crate::dates::today_epoch_days(), days_back);
         config.insert("from_date".to_string(), json!(from));
         config.insert("to_date".to_string(), json!(to));
     }
@@ -144,46 +144,13 @@ fn x_handles(raw: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn freshness_days(freshness: &str) -> Option<u64> {
-    match freshness {
-        "day" => Some(1),
-        "week" => Some(7),
-        "month" => Some(30),
-        "year" => Some(365),
-        _ => None,
-    }
-}
-
-fn today_epoch_days() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-        / 86400
-}
-
 /// x_search dates are UTC `YYYY-MM-DD` and `to_date` is exclusive, so the
 /// range ends tomorrow — ending it today would drop today's posts.
 fn date_range(today: u64, days_back: u64) -> (String, String) {
     (
-        epoch_days_to_date(today.saturating_sub(days_back)),
-        epoch_days_to_date(today + 1),
+        crate::dates::epoch_days_to_date(today.saturating_sub(days_back)),
+        crate::dates::epoch_days_to_date(today + 1),
     )
-}
-
-fn epoch_days_to_date(total_days: u64) -> String {
-    // Algorithm to convert days since 1970-01-01 to YYYY-MM-DD
-    let z = total_days as i64 + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    format!("{y:04}-{m:02}-{d:02}")
 }
 
 #[derive(Deserialize)]
@@ -488,7 +455,7 @@ mod tests {
     #[test]
     fn date_range_end_is_exclusive_tomorrow() {
         // 2026-10-31 is epoch day 20757.
-        assert_eq!(epoch_days_to_date(20757), "2026-10-31");
+        assert_eq!(crate::dates::epoch_days_to_date(20757), "2026-10-31");
         assert_eq!(
             date_range(20757, 1),
             ("2026-10-30".to_string(), "2026-11-01".to_string())
