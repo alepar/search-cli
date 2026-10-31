@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.10.0 — 2026-10-31
+
+First release from the alepar/search-cli fork (based on upstream 0.9.0).
 
 - Kagi added as the 14th provider (general/news/deep). Uses Kagi Search API
   v1 (`POST https://kagi.com/api/v1/search`, Bearer auth), open to all Kagi
@@ -11,6 +13,9 @@
   balance, so `search usage` lists it as unsupported; `search stats` estimates
   $0.012 per call. A malformed key (Kagi answers HTTP 400
   `general.invalid_token`) is reported as an auth failure.
+- `search update` and `install.sh` now fetch releases from alepar/search-cli.
+- `self_update` and `readability` no longer pull in native-tls/OpenSSL, which
+  collided with the BoringSSL used by the `stealth` feature at link time.
 
 ## 0.9.0 — 2026-07-25
 

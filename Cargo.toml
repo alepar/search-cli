@@ -1,12 +1,12 @@
 [package]
 name = "agent-search"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2021"
 description = "Unified multi-provider search CLI for AI agents — 14 providers, 13 modes, email verification, one binary"
 license = "MIT"
-repository = "https://github.com/paperfoot/search-cli"
-homepage = "https://github.com/paperfoot/search-cli"
-documentation = "https://github.com/paperfoot/search-cli#readme"
+repository = "https://github.com/alepar/search-cli"
+homepage = "https://github.com/alepar/search-cli"
+documentation = "https://github.com/alepar/search-cli#readme"
 keywords = ["search", "cli", "ai-agent", "meta-search", "web-search"]
 categories = ["command-line-utilities", "web-programming"]
 readme = "README.md"

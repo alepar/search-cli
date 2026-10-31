@@ -1,9 +1,9 @@
 #!/bin/sh
 # Install search-cli - agent-friendly multi-provider search
-# Usage: curl -fsSL https://raw.githubusercontent.com/paperfoot/search-cli/master/install.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/alepar/search-cli/master/install.sh | sh
 set -e
 
-REPO="paperfoot/search-cli"
+REPO="alepar/search-cli"
 BINARY="search"
 
 # Detect OS and architecture

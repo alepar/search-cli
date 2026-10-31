@@ -1069,7 +1069,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             if check {
                 let res = tokio::task::spawn_blocking(move || {
                     self_update::backends::github::Update::configure()
-                        .repo_owner("paperfoot")
+                        .repo_owner("alepar")
                         .repo_name("search-cli")
                         .bin_name("search")
                         .current_version(current)
@@ -1126,14 +1126,14 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                         // (older) release when several are newer than current. Pin
                         // it to the actual latest tag (get_latest_release is correct).
                         let latest = self_update::backends::github::Update::configure()
-                            .repo_owner("paperfoot")
+                            .repo_owner("alepar")
                             .repo_name("search-cli")
                             .bin_name("search")
                             .current_version(current)
                             .build()?
                             .get_latest_release()?;
                         self_update::backends::github::Update::configure()
-                            .repo_owner("paperfoot")
+                            .repo_owner("alepar")
                             .repo_name("search-cli")
                             .bin_name("search")
                             .current_version(current)

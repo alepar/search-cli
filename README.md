@@ -52,12 +52,12 @@ brew install search-cli
 
 **One-liner (macOS / Linux):**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/paperfoot/search-cli/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/alepar/search-cli/master/install.sh | sh
 ```
 
 **From source:**
 ```bash
-cargo install --git https://github.com/paperfoot/search-cli
+cargo install --git https://github.com/alepar/search-cli
 ```
 
 Binary size is ~6 MB. Startup is ~2 ms. Memory is ~5 MB. No Python, no Node, no Docker.
@@ -348,7 +348,7 @@ search update --check     # Check without installing
 ## Building from Source
 
 ```bash
-git clone https://github.com/paperfoot/search-cli
+git clone https://github.com/alepar/search-cli
 cd search-cli
 cargo build --release
 # Binary at target/release/search
