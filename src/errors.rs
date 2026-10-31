@@ -168,7 +168,7 @@ impl SearchError {
                 mode
             )),
             Self::RateLimited { provider } => Some(format!(
-                "Rate limited by {}. Wait and retry, or use a different provider: search -p <other>",
+                "Rate limited by {}. Wait and retry, or use a different provider: search search -q <query> -p <other>",
                 provider
             )),
             Self::InvalidInput { .. } => Some("Check arguments with: search --help".to_string()),
@@ -255,7 +255,7 @@ fn suggestion_for_failures(failed: &[ProviderFailure]) -> String {
     } else if failed.iter().all(|f| matches!(f.category, Blocked | Parse)) {
         "The site served bot or login walls to every provider. Use a sanctioned route (an API, feed or archive copy), or open the URL in a browser.".to_string()
     } else if failed.iter().any(|f| f.retryable) {
-        "Some failures look transient. Retry, or narrow to a healthy provider with `search -p <name>`.".to_string()
+        "Some failures look transient. Retry, or narrow to a healthy provider with `search search -q <query> -p <name>`.".to_string()
     } else {
         "All providers failed. Run `search config check` to verify configuration.".to_string()
     }

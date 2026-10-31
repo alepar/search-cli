@@ -158,7 +158,7 @@ fn test_exit_code_no_providers() {
         .args(["search", "-q", "test", "-p", "nonexistent", "--json"])
         .output()
         .unwrap();
-    assert_eq!(output.status.code().unwrap(), 2); // config error
+    assert_eq!(output.status.code().unwrap(), 3); // bad input: unknown -p
 }
 
 // =============================================================================

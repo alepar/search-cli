@@ -423,6 +423,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 if let Some(mut cached) = cache::load_last() {
                     cached.metadata.cached = true;
                     cached.metadata.cache_age_secs = cache::last_age_secs();
+                    apply_max_chars(&mut cached, args.max_chars);
                     if ctx.is_json() {
                         output::json::render(&cached);
                     } else if !ctx.suppress_human() {
@@ -463,11 +464,13 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 ];
                 for p in providers {
                     if !KNOWN.iter().any(|k| k.eq_ignore_ascii_case(p)) {
-                        let err = errors::SearchError::Config(format!(
-                            "Unknown provider '{}'. Valid: {}",
-                            p,
-                            KNOWN.join(", ")
-                        ));
+                        let err = errors::SearchError::InvalidInput {
+                            message: format!(
+                                "Unknown provider '{}'. Valid: {}",
+                                p,
+                                KNOWN.join(", ")
+                            ),
+                        };
                         if ctx.is_json() {
                             output::json::render_error(&err);
                         } else {
@@ -714,7 +717,14 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                         use std::io::BufRead;
                         let mut line = String::new();
                         std::io::stdin().lock().read_line(&mut line)?;
-                        line.trim().to_string()
+                        let line = line.trim().to_string();
+                        // Empty stdin would silently blank an existing key.
+                        if line.is_empty() {
+                            return Err(errors::SearchError::InvalidInput {
+                                message: format!("no value on stdin for {key}"),
+                            });
+                        }
+                        line
                     } else {
                         value
                     };
@@ -1149,15 +1159,16 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             }
 
             if emails.is_empty() {
-                let err = errors::SearchError::Config(
-                    "No email addresses provided. Usage: search verify user@example.com".into(),
-                );
+                let err = errors::SearchError::InvalidInput {
+                    message: "No email addresses provided. Usage: search verify user@example.com"
+                        .into(),
+                };
                 if ctx.is_json() {
                     output::json::render_error(&err);
                 } else {
                     eprintln!("Error: {err}");
                 }
-                return Ok(2);
+                return Ok(err.exit_code());
             }
 
             let start = std::time::Instant::now();
