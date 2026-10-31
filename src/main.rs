@@ -694,6 +694,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                             "settings": {
                                 "timeout": app.config.settings.timeout,
                                 "count": app.config.settings.count,
+                                "email": app.config.settings.email,
                             },
                             "providers_configured": configured,
                             "metasearch": {

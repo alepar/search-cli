@@ -137,6 +137,14 @@ fn test_config_show() {
 }
 
 #[test]
+fn test_config_show_json_includes_settings_email() {
+    // settings.email (scholarly contact) is not a secret; JSON shows it.
+    let output = search_cmd().args(["config", "show"]).output().unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(json["settings"]["email"].is_string());
+}
+
+#[test]
 fn test_no_providers_error_json() {
     // Use a fake provider name to ensure no providers match
     let output = search_cmd()
