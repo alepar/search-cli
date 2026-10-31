@@ -16,6 +16,7 @@ mod stats;
 mod types;
 mod usage;
 mod verify;
+mod walls;
 
 use clap::Parser;
 use cli::{Cli, Commands, ConfigAction, SkillAction};

@@ -14,6 +14,15 @@ pub enum SearchError {
         status: Option<u16>,
     },
 
+    /// The site walls off automated retrieval (bot or login wall), or has no
+    /// sanctioned route for it.
+    #[error("{provider}: {message}")]
+    Blocked {
+        provider: &'static str,
+        code: &'static str,
+        message: String,
+    },
+
     #[error("Authentication missing for {provider}")]
     AuthMissing { provider: &'static str },
 
@@ -58,14 +67,14 @@ impl SearchError {
             Self::AllProvidersFailed { failed } => exit_code_for_failures(failed),
             #[cfg(feature = "stealth")]
             Self::Wreq(_) => 1,
-            Self::Api { .. } | Self::Http(_) | Self::Resolver(_) => 1,
+            Self::Api { .. } | Self::Http(_) | Self::Resolver(_) | Self::Blocked { .. } => 1,
             Self::Json(_) | Self::Io(_) => 1,
         }
     }
 
     pub fn error_code(&self) -> &'static str {
         match self {
-            Self::Api { code, .. } => code,
+            Self::Api { code, .. } | Self::Blocked { code, .. } => code,
             Self::AuthMissing { .. } => "auth_missing",
             Self::RateLimited { .. } => "rate_limited",
             Self::Config(_) => "config_error",
@@ -86,6 +95,7 @@ impl SearchError {
         use FailureCategory as C;
         match self {
             Self::AuthMissing { .. } => C::Auth,
+            Self::Blocked { .. } => C::Blocked,
             Self::RateLimited { .. } => C::RateLimit,
             Self::Api { status, code, .. } => {
                 if *code == "json_error" {
@@ -240,6 +250,8 @@ fn suggestion_for_failures(failed: &[ProviderFailure]) -> String {
         .all(|f| matches!(f.category, Auth | BillingQuota | Config))
     {
         "Every provider failed on credentials/billing. Run `search config check` and verify your API keys have credit.".to_string()
+    } else if failed.iter().all(|f| matches!(f.category, Blocked | Parse)) {
+        "The site served bot or login walls to every provider. Use a sanctioned route (an API, feed or archive copy), or open the URL in a browser.".to_string()
     } else if failed.iter().any(|f| f.retryable) {
         "Some failures look transient. Retry, or narrow to a healthy provider with `search -p <name>`.".to_string()
     } else {
