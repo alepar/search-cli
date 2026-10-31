@@ -23,7 +23,9 @@ pub struct ProviderUsage {
     pub configured: bool,
     /// Provider-reported usage figures, normalized where possible. Keys vary
     /// by provider (each bills differently); `credits_remaining` is populated
-    /// whenever the provider reports a spendable balance.
+    /// whenever the provider reports a spendable balance; `summary`, when
+    /// present, is a one-line human description that replaces the balance
+    /// (e.g. pay-as-you-go accounts with no finite balance).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -167,24 +169,66 @@ async fn firecrawl_usage(ctx: &AppContext, key: String) -> Result<serde_json::Va
     }))
 }
 
-/// Tavily: GET https://api.tavily.com/usage (Bearer tvly- key). Reports
-/// consumption + limits; remaining is computed as limit - usage.
+/// Tavily: GET https://api.tavily.com/usage (Bearer tvly- key).
 async fn tavily_usage(ctx: &AppContext, key: String) -> Result<serde_json::Value, String> {
     let v = get_json(ctx, "https://api.tavily.com/usage", Some(&key), None).await?;
-    let account = v.get("account").unwrap_or(&v);
-    let plan_usage = account.get("plan_usage").and_then(|x| x.as_f64());
-    let plan_limit = account.get("plan_limit").and_then(|x| x.as_f64());
-    let remaining = match (plan_usage, plan_limit) {
-        (Some(u), Some(l)) => Some(l - u),
+    Ok(tavily_usage_from(&v))
+}
+
+/// Tavily reports the plan's included credits (`plan_limit`) and everything
+/// used this cycle (`plan_usage`). On pay-as-you-go, usage past the plan
+/// is billed as overage (`paygo_usage`, capped by `paygo_limit` when one is
+/// set), so `plan_limit - plan_usage` going negative means overage, not an
+/// exhausted account.
+fn tavily_usage_from(v: &serde_json::Value) -> serde_json::Value {
+    let account = v.get("account").unwrap_or(v);
+    let num = |k: &str| account.get(k).and_then(|x| x.as_f64());
+    let plan_usage = num("plan_usage");
+    let plan_limit = num("plan_limit");
+    let paygo_usage = num("paygo_usage");
+    let paygo_limit = num("paygo_limit");
+
+    let plan_remaining = match (plan_usage, plan_limit) {
+        (Some(u), Some(l)) => Some((l - u).max(0.0)),
         _ => None,
     };
-    Ok(serde_json::json!({
-        "credits_remaining": remaining,
+    let on_paygo = paygo_usage.is_some_and(|u| u > 0.0)
+        || matches!((plan_usage, plan_limit), (Some(u), Some(l)) if u > l);
+    // Spendable balance: what is left of the plan, plus the PAYG headroom when
+    // a cap is set. Uncapped PAYG has no finite balance, so it stays null.
+    let credits_remaining = match (on_paygo, paygo_limit) {
+        (false, _) => plan_remaining,
+        (true, Some(cap)) => {
+            Some(plan_remaining.unwrap_or(0.0) + (cap - paygo_usage.unwrap_or(0.0)).max(0.0))
+        }
+        (true, None) => None,
+    };
+    let fmt = |x: f64| format!("{x:.0}");
+    let summary = on_paygo.then(|| {
+        let cap = paygo_limit.map_or("no cap".to_string(), |c| format!("cap {}", fmt(c)));
+        format!(
+            "pay-as-you-go: {} credits of overage this cycle ({cap}); plan {}/{} used",
+            fmt(paygo_usage.unwrap_or(0.0)),
+            plan_usage.map_or("?".into(), fmt),
+            plan_limit.map_or("?".into(), fmt),
+        )
+    });
+
+    let mut out = serde_json::json!({
+        "credits_remaining": credits_remaining,
+        "plan_remaining": plan_remaining,
         "plan_usage": plan_usage,
         "plan_limit": plan_limit,
+        "pay_as_you_go": on_paygo,
+        "paygo_usage": paygo_usage,
+        "paygo_limit": paygo_limit,
         "current_plan": account.get("current_plan").cloned(),
         "unit": "credits",
-    }))
+    });
+    if let Some(summary) = summary {
+        out["summary"] = summary.into();
+    }
+    out
 }
 
 /// Linkup: GET https://api.linkup.so/v1/credits/balance (Bearer) -> { balance }.
@@ -320,5 +364,42 @@ fn resolve_provider_key(ctx: &AppContext, name: &str) -> String {
         "parallel" => providers::resolve_key(&k.parallel, "PARALLEL_API_KEY"),
         "xai" => providers::resolve_key(&k.xai, "XAI_API_KEY"),
         _ => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tavily_usage_from;
+    use serde_json::json;
+
+    #[test]
+    fn tavily_paygo_overage_is_not_a_negative_balance() {
+        // Shape of a live /usage response on a PAYG account past its plan.
+        let v = json!({"account": {"current_plan": "Researcher", "plan_usage": 6962,
+            "plan_limit": 1000, "paygo_usage": 5948, "paygo_limit": null}});
+        let u = tavily_usage_from(&v);
+        assert_eq!(u["pay_as_you_go"], true);
+        assert_eq!(u["plan_remaining"], 0.0);
+        assert!(u["credits_remaining"].is_null());
+        assert_eq!(
+            u["summary"],
+            "pay-as-you-go: 5948 credits of overage this cycle (no cap); plan 6962/1000 used"
+        );
+    }
+
+    #[test]
+    fn tavily_paygo_cap_adds_headroom() {
+        let v = json!({"account": {"plan_usage": 1200, "plan_limit": 1000,
+            "paygo_usage": 200, "paygo_limit": 500}});
+        assert_eq!(tavily_usage_from(&v)["credits_remaining"], 300.0);
+    }
+
+    #[test]
+    fn tavily_plan_only() {
+        let v = json!({"account": {"plan_usage": 250, "plan_limit": 1000, "paygo_usage": 0}});
+        let u = tavily_usage_from(&v);
+        assert_eq!(u["pay_as_you_go"], false);
+        assert_eq!(u["credits_remaining"], 750.0);
+        assert!(u.get("summary").is_none());
     }
 }

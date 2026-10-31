@@ -907,6 +907,13 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                         println!("  {:<12} {}", u.provider, "not configured".yellow());
                     } else if let Some(err) = &u.error {
                         println!("  {:<12} {}", u.provider.bold(), err.red());
+                    } else if let Some(summary) = u
+                        .data
+                        .as_ref()
+                        .and_then(|d| d.get("summary"))
+                        .and_then(|v| v.as_str())
+                    {
+                        println!("  {:<12} {}", u.provider.bold(), summary.green());
                     } else if let Some(data) = &u.data {
                         let remaining = data
                             .get("credits_remaining")

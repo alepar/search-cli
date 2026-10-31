@@ -37,6 +37,14 @@
 - Install docs point at this fork: install.sh, GitHub Releases, or
   `cargo install --git https://github.com/alepar/search-cli`. The Homebrew tap
   and crates.io instructions were upstream's.
+- Tavily: result dates now populate (the code read `published_time`; the API
+  field is `published_date`). Auth moves to the documented Bearer header, and
+  `-c` is capped at the API maximum of 20.
+- `search usage` on a Tavily pay-as-you-go account reports the overage
+  ("pay-as-you-go: N credits of overage this cycle") instead of a negative
+  remaining balance. JSON gains `pay_as_you_go`, `plan_remaining`,
+  `paygo_usage`, `paygo_limit` and `summary`; `credits_remaining` is null when
+  PAYG has no cap.
 
 ## 0.10.0 — 2026-10-31
 
