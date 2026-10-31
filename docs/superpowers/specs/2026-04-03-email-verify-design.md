@@ -38,7 +38,7 @@ No email is ever sent (we QUIT before DATA).
 | `valid` | 250 on strict domain | Mailbox confirmed |
 | `invalid` | 550/551/553 | Mailbox rejected |
 | `catch_all` | 250 but catch-all detected | Domain accepts everything |
-| `unreachable` | Connection refused / no MX | Server down |
+| `unreachable` | Connection refused / no MX / any other refusal (5.7.x policy, 552, 554, unknown codes) | Could not verify |
 | `timeout` | No response in 10s | Server didn't respond |
 | `syntax_error` | N/A | Not a valid email format |
 

@@ -24,7 +24,7 @@ stealth = ["dep:wreq", "dep:wreq-util"]
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util", "sync"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -52,6 +52,7 @@ roxmltree = "0.21.2"
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
+tokio = { version = "1", features = ["test-util"] }
 
 [profile.release]
 lto = true

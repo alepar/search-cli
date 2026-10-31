@@ -5,6 +5,9 @@ on:
     branches: [master]
   pull_request:
   workflow_dispatch:
+  # release.yml runs this whole workflow on the tag and publishes only
+  # when every job passes.
+  workflow_call:
   # Weekly: catches new RustSec advisories and new stable-toolchain lints
   # between pushes.
   schedule:

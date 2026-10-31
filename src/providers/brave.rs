@@ -23,17 +23,19 @@ impl Brave {
 #[derive(Deserialize)]
 struct BraveResponse {
     web: Option<BraveWeb>,
-    news: Option<BraveNews>,
+}
+
+/// The news endpoint returns `results` at the top level, unlike web search,
+/// which nests news under `news.results`.
+#[derive(Deserialize)]
+struct BraveNewsResponse {
+    #[serde(default)]
+    results: Vec<BraveNewsResult>,
 }
 
 #[derive(Deserialize)]
 struct BraveWeb {
     results: Vec<BraveResult>,
-}
-
-#[derive(Deserialize)]
-struct BraveNews {
-    results: Vec<BraveNewsResult>,
 }
 
 #[derive(Deserialize)]
@@ -63,16 +65,15 @@ fn map_freshness(f: &str) -> &str {
     }
 }
 
+/// Brave web search's documented maximum `count`.
+// Documented per-request maxima; a larger count fails the request with 422.
+pub(super) const WEB_MAX_COUNT: usize = 20;
+pub(super) const NEWS_MAX_COUNT: usize = 50;
+pub(super) const LLM_CONTEXT_MAX_COUNT: usize = 50;
+
 /// Append site: operators for domain filtering
 fn augment_query(query: &str, opts: &SearchOpts) -> String {
-    let mut q = query.to_string();
-    for d in &opts.include_domains {
-        q = format!("{q} site:{d}");
-    }
-    for d in &opts.exclude_domains {
-        q = format!("{q} -site:{d}");
-    }
-    q
+    super::with_site_operators(query, opts)
 }
 
 #[async_trait]
@@ -109,7 +110,7 @@ impl super::Provider for Brave {
 
         let client = &self.ctx.client;
         let api_key = self.api_key();
-        let count_str = count.to_string();
+        let count_str = count.min(WEB_MAX_COUNT).to_string();
         let q = augment_query(query, opts);
         let freshness = opts.freshness.as_deref().map(map_freshness);
 
@@ -189,7 +190,7 @@ impl super::Provider for Brave {
 
         let client = &self.ctx.client;
         let api_key = self.api_key();
-        let count_str = count.to_string();
+        let count_str = count.min(NEWS_MAX_COUNT).to_string();
         let q = augment_query(query, opts);
         let freshness = opts.freshness.as_deref().map(map_freshness);
 
@@ -216,33 +217,33 @@ impl super::Provider for Brave {
 
             let body_bytes = resp.bytes().await?;
             let mut body_vec = body_bytes.to_vec();
-            let body: BraveResponse =
-                simd_json::from_slice(&mut body_vec).map_err(|e| SearchError::Api {
-                    provider: "brave",
-                    code: "json_error",
-                    status: None,
-                    message: e.to_string(),
-                })?;
-            let results = body
-                .news
-                .map(|n| n.results)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|r| SearchResult {
-                    title: r.title.unwrap_or_default(),
-                    url: r.url.unwrap_or_default(),
-                    snippet: r.description.unwrap_or_default(),
-                    source: "brave_news".to_string(),
-                    published: r.age,
-                    image_url: None,
-                    extra: None,
-                })
-                .collect();
-
+            let results = parse_news(&mut body_vec)?;
             Ok(results)
         })
         .await
     }
+}
+
+fn parse_news(body: &mut [u8]) -> Result<Vec<SearchResult>, SearchError> {
+    let body: BraveNewsResponse = simd_json::from_slice(body).map_err(|e| SearchError::Api {
+        provider: "brave",
+        code: "json_error",
+        status: None,
+        message: e.to_string(),
+    })?;
+    Ok(body
+        .results
+        .into_iter()
+        .map(|r| SearchResult {
+            title: r.title.unwrap_or_default(),
+            url: r.url.unwrap_or_default(),
+            snippet: r.description.unwrap_or_default(),
+            source: "brave_news".to_string(),
+            published: r.age,
+            image_url: None,
+            extra: None,
+        })
+        .collect())
 }
 
 impl Brave {
@@ -260,7 +261,7 @@ impl Brave {
         let client = &self.ctx.client;
         let api_key = self.api_key();
         let q = augment_query(query, opts);
-        let count_str = count.to_string();
+        let count_str = count.min(LLM_CONTEXT_MAX_COUNT).to_string();
         let freshness = opts.freshness.as_deref().map(map_freshness);
 
         super::retry_request(|| async {
@@ -323,5 +324,25 @@ impl Brave {
             Ok(results)
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn news_results_are_read_from_the_top_level() {
+        // Shape of /res/v1/news/search (checked live 2026-10-31); the old
+        // parser looked under `news.results` and always returned nothing.
+        let mut body = br#"{"type":"news","query":{"original":"q"},"results":[
+            {"title":"Battery news","url":"https://example.com/a",
+             "description":"Solid-state","age":"2 days ago"}]}"#
+            .to_vec();
+        let results = parse_news(&mut body).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].url, "https://example.com/a");
+        assert_eq!(results[0].source, "brave_news");
+        assert_eq!(results[0].published.as_deref(), Some("2 days ago"));
     }
 }

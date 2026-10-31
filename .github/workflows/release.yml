@@ -8,7 +8,13 @@ permissions:
   contents: write
 
 jobs:
+  # The full CI suite (fmt, clippy, tests, stealth, MSRV, cargo-deny) on the
+  # tagged commit. Nothing is built or published unless it passes.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   build:
+    needs: ci
     strategy:
       fail-fast: false
       matrix:

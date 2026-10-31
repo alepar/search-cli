@@ -6,6 +6,11 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Serper returns one Google page (10 results) per request. A larger `num`
+/// is echoed but ignored on web search, and on news num=30 returns an empty
+/// list with no error (checked live 2026-10-31).
+pub(super) const MAX_COUNT: usize = 10;
+
 pub struct Serper {
     ctx: Arc<AppContext>,
 }
@@ -36,7 +41,7 @@ impl Serper {
         let client = &self.ctx.client;
         let api_key = self.api_key();
 
-        let mut body = json!({ "q": q, "num": count });
+        let mut body = json!({ "q": q, "num": count.min(MAX_COUNT) });
         // Serper freshness via tbs param: qdr:d, qdr:w, qdr:m, qdr:y
         if let Some(f) = &opts.freshness {
             let tbs = match f.as_str() {
@@ -80,14 +85,7 @@ impl Serper {
 }
 
 fn augment_query(query: &str, opts: &SearchOpts) -> String {
-    let mut q = query.to_string();
-    for d in &opts.include_domains {
-        q = format!("{q} site:{d}");
-    }
-    for d in &opts.exclude_domains {
-        q = format!("{q} -site:{d}");
-    }
-    q
+    super::with_site_operators(query, opts)
 }
 
 fn parse_organic(body: &serde_json::Value, source: &str) -> Vec<SearchResult> {

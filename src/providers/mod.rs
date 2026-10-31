@@ -35,8 +35,10 @@ where
     // dead for the cases it exists for. Permanent 4xx (401/402/400) are NOT
     // retried; that would just burn the budget.
     //
-    // Budget invariant: worst-case backoff (~0.2s + ~0.4s, jittered) plus one
-    // full attempt must fit inside the smallest provider timeout (10s).
+    // The caller's Provider::timeout() bounds the whole retry sequence, so a
+    // slow attempt can use the full budget and leave no room for a retry.
+    // The client has a connect timeout only, so a transport Timeout here is
+    // a connect failure, which is cheap to retry.
     f.retry(
         ExponentialBuilder::default()
             .with_jitter()
@@ -118,6 +120,29 @@ pub fn http_error_message(status: u16, body: &str) -> String {
 
 /// UTC date `days` ago as `YYYY-MM-DD`, without a date-crate dependency.
 /// Used to translate the CLI's freshness words into provider date floors.
+/// Append Google-style site operators for -d / --exclude-domain. Several
+/// includes are OR-ed in one group: bare `site:a site:b` is an AND that no
+/// page can satisfy. Exclusions stay `-site:` conjunctions.
+pub fn with_site_operators(query: &str, opts: &SearchOpts) -> String {
+    let mut q = query.to_string();
+    match opts.include_domains.as_slice() {
+        [] => {}
+        [d] => q = format!("{q} site:{d}"),
+        many => {
+            let any = many
+                .iter()
+                .map(|d| format!("site:{d}"))
+                .collect::<Vec<_>>()
+                .join(" OR ");
+            q = format!("{q} ({any})");
+        }
+    }
+    for d in &opts.exclude_domains {
+        q = format!("{q} -site:{d}");
+    }
+    q
+}
+
 pub fn date_days_ago(days: u64) -> String {
     crate::dates::epoch_days_to_date(crate::dates::today_epoch_days().saturating_sub(days))
 }
@@ -223,7 +248,50 @@ pub fn build_providers(ctx: &Arc<AppContext>) -> Vec<Box<dyn Provider>> {
 }
 
 #[cfg(test)]
+mod site_operator_tests {
+    use super::*;
+
+    fn opts(inc: &[&str], exc: &[&str]) -> SearchOpts {
+        SearchOpts {
+            include_domains: inc.iter().map(|s| s.to_string()).collect(),
+            exclude_domains: exc.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn several_include_domains_are_or_ed() {
+        assert_eq!(with_site_operators("q", &opts(&[], &[])), "q");
+        assert_eq!(
+            with_site_operators("q", &opts(&["a.com"], &[])),
+            "q site:a.com"
+        );
+        assert_eq!(
+            with_site_operators("q", &opts(&["a.com", "b.com"], &["c.com"])),
+            "q (site:a.com OR site:b.com) -site:c.com"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    #[test]
+    fn per_request_counts_stay_within_documented_maxima() {
+        // `-c 30` (recommended for deep mode) used to fail brave web with
+        // 422 and jina with 400; fusion handles the total, each request
+        // must stay within the provider's cap.
+        assert_eq!(super::brave::WEB_MAX_COUNT, 20);
+        assert_eq!(super::brave::NEWS_MAX_COUNT, 50);
+        assert_eq!(super::brave::LLM_CONTEXT_MAX_COUNT, 50);
+        assert_eq!(super::jina::MAX_COUNT, 20);
+        assert_eq!(super::serper::MAX_COUNT, 10);
+        assert_eq!(super::serpapi::max_count("google_scholar"), 20);
+        assert_eq!(super::serpapi::max_count("google"), 100);
+        assert_eq!(super::exa::MAX_COUNT, 100);
+        assert_eq!(super::firecrawl::MAX_COUNT, 100);
+        assert_eq!(super::parallel::MAX_COUNT, 40);
+    }
+
     #[test]
     fn html_to_text_strips_tags_scripts_and_styles() {
         let html = "<html><head><style>p{color:red}</style><SCRIPT>var a = '<b>';</SCRIPT></head>\

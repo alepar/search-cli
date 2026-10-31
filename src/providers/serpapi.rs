@@ -5,6 +5,15 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Per-request `num` maximum: Google Scholar pages hold 20, web search 100.
+pub(super) fn max_count(engine: &str) -> usize {
+    if engine == "google_scholar" {
+        20
+    } else {
+        100
+    }
+}
+
 pub struct SerpApi {
     ctx: Arc<AppContext>,
 }
@@ -48,7 +57,7 @@ impl SerpApi {
         // The Google News engine takes neither `num` nor `tbs`; freshness goes
         // into the query as a `when:` operator instead (augment_query).
         if !news {
-            params.push(("num".to_string(), count.to_string()));
+            params.push(("num".to_string(), count.min(max_count(engine)).to_string()));
         }
 
         if let Some(f) = opts.freshness.as_ref().filter(|_| !news) {
@@ -84,13 +93,7 @@ impl SerpApi {
 }
 
 fn augment_query(query: &str, opts: &SearchOpts, news: bool) -> String {
-    let mut q = query.to_string();
-    for d in &opts.include_domains {
-        q = format!("{q} site:{d}");
-    }
-    for d in &opts.exclude_domains {
-        q = format!("{q} -site:{d}");
-    }
+    let mut q = super::with_site_operators(query, opts);
     if let Some(when) = opts
         .freshness
         .as_deref()

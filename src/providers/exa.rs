@@ -7,6 +7,9 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Exa documents numResults up to 100.
+pub(super) const MAX_COUNT: usize = 100;
+
 pub struct Exa {
     ctx: Arc<AppContext>,
 }
@@ -103,7 +106,7 @@ fn to_results(exa: ExaResponse, source: &str) -> Vec<SearchResult> {
 fn build_search_body(query: &str, count: usize, opts: &SearchOpts) -> serde_json::Value {
     let mut body = json!({
         "query": query,
-        "numResults": count,
+        "numResults": count.min(MAX_COUNT),
         "type": "auto",
         "contents": {
             "text": true,
@@ -173,7 +176,7 @@ impl Exa {
         count: usize,
     ) -> Result<Vec<SearchResult>, SearchError> {
         let body = json!({
-            "query": query, "numResults": count, "type": "auto",
+            "query": query, "numResults": count.min(MAX_COUNT), "type": "auto",
             "category": "people", "contents": { "text": true }
         });
         let resp = self.post_api("search", body).await?;
@@ -191,7 +194,8 @@ impl Exa {
         // returns pages about the same site rather than similar sites, so
         // this stays on /findSimilar until Exa removes it or ships a
         // like-for-like replacement.
-        let body = json!({ "url": url, "numResults": count, "contents": { "text": true } });
+        let body =
+            json!({ "url": url, "numResults": count.min(MAX_COUNT), "contents": { "text": true } });
         let resp = self.post_api("findSimilar", body).await?;
         Ok(to_results(resp, "exa_similar"))
     }
@@ -213,6 +217,12 @@ mod tests {
         assert_eq!(r[0].snippet, "h1 ... h2");
         assert_eq!(r[0].published.as_deref(), Some("2026-10-01T00:00:00.000Z"));
         assert_eq!(r[1].snippet, "full b");
+    }
+
+    #[test]
+    fn search_body_caps_num_results() {
+        let body = build_search_body("rust", 150, &SearchOpts::default());
+        assert_eq!(body["numResults"], 100);
     }
 
     #[test]

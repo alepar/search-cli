@@ -70,6 +70,11 @@ pub struct IdentityKey {
     pub last_used_at: Option<String>,
 }
 
+/// Per-request budget for account calls, which have no outer timeout.
+fn account_timeout(config: &AppConfig) -> Duration {
+    Duration::from_secs(config.settings.timeout)
+}
+
 /// Account base URL: `METASEARCH_URL` > config > metasearch.sh.
 pub fn resolve_base_url(config: &AppConfig) -> String {
     if let Ok(v) = std::env::var("METASEARCH_URL")
@@ -215,6 +220,7 @@ pub async fn login(
             "client_version": env!("CARGO_PKG_VERSION"),
             "hostname": hostname(),
         }))
+        .timeout(account_timeout(config))
         .send()
         .await
         .map_err(|e| api_error(format!("could not reach {base}: {e}")))?;
@@ -277,6 +283,7 @@ pub async fn login(
         let resp = match client
             .post(format!("{base}/api/v1/device/token"))
             .json(&serde_json::json!({ "device_code": start.device_code }))
+            .timeout(account_timeout(config))
             .send()
             .await
         {
@@ -402,6 +409,7 @@ pub async fn logout(
             let resp = client
                 .delete(format!("{base}/api/v1/me"))
                 .bearer_auth(&token)
+                .timeout(account_timeout(config))
                 .send()
                 .await;
             revoked = matches!(resp, Ok(r) if r.status().is_success());
@@ -455,6 +463,7 @@ pub async fn whoami(
     let resp = client
         .get(format!("{base}/api/v1/me"))
         .bearer_auth(&token)
+        .timeout(account_timeout(config))
         .send()
         .await
         .map_err(|e| api_error(format!("could not reach {base}: {e}")))?;

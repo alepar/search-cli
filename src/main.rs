@@ -423,6 +423,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 if let Some(mut cached) = cache::load_last() {
                     cached.metadata.cached = true;
                     cached.metadata.cache_age_secs = cache::last_age_secs();
+                    apply_max_chars(&mut cached, args.max_chars);
                     if ctx.is_json() {
                         output::json::render(&cached);
                     } else if !ctx.suppress_human() {
@@ -463,11 +464,13 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 ];
                 for p in providers {
                     if !KNOWN.iter().any(|k| k.eq_ignore_ascii_case(p)) {
-                        let err = errors::SearchError::Config(format!(
-                            "Unknown provider '{}'. Valid: {}",
-                            p,
-                            KNOWN.join(", ")
-                        ));
+                        let err = errors::SearchError::InvalidInput {
+                            message: format!(
+                                "Unknown provider '{}'. Valid: {}",
+                                p,
+                                KNOWN.join(", ")
+                            ),
+                        };
                         if ctx.is_json() {
                             output::json::render_error(&err);
                         } else {
@@ -617,6 +620,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 None
             };
 
+            let started = std::time::Instant::now();
             let response =
                 engine::run(app, &args.query, args.mode, count, &args.providers, &opts).await;
 
@@ -624,15 +628,25 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 sp.finish_and_clear();
             }
 
+            if let Err(errors::SearchError::AllProvidersFailed { failed }) = &response {
+                logging::log_failed_search(
+                    &args.query,
+                    &mode_str,
+                    started.elapsed().as_millis(),
+                    failed,
+                );
+            }
             let mut response = response?;
 
             // Don't cache empty results — a transient no_results shouldn't be
             // replayed for 5 minutes after the cause clears. (Total failure is
-            // already an Err and never reaches here.) The full response is
-            // cached; --max-chars truncation applies per invocation at render.
+            // already an Err and never reaches here.) Nor a partial success:
+            // a provider blip would be replayed as the answer. The full
+            // response is cached; --max-chars truncation applies per
+            // invocation at render.
             if !response.results.is_empty() {
                 cache::save_last(&response);
-                if cacheable {
+                if cacheable && response.metadata.provider_failures.is_empty() {
                     cache::save_query(&args.query, &mode_str, count, &response);
                 }
             }
@@ -680,6 +694,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                             "settings": {
                                 "timeout": app.config.settings.timeout,
                                 "count": app.config.settings.count,
+                                "email": app.config.settings.email,
                             },
                             "providers_configured": configured,
                             "metasearch": {
@@ -703,7 +718,14 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                         use std::io::BufRead;
                         let mut line = String::new();
                         std::io::stdin().lock().read_line(&mut line)?;
-                        line.trim().to_string()
+                        let line = line.trim().to_string();
+                        // Empty stdin would silently blank an existing key.
+                        if line.is_empty() {
+                            return Err(errors::SearchError::InvalidInput {
+                                message: format!("no value on stdin for {key}"),
+                            });
+                        }
+                        line
                     } else {
                         value
                     };
@@ -1138,15 +1160,16 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             }
 
             if emails.is_empty() {
-                let err = errors::SearchError::Config(
-                    "No email addresses provided. Usage: search verify user@example.com".into(),
-                );
+                let err = errors::SearchError::InvalidInput {
+                    message: "No email addresses provided. Usage: search verify user@example.com"
+                        .into(),
+                };
                 if ctx.is_json() {
                     output::json::render_error(&err);
                 } else {
                     eprintln!("Error: {err}");
                 }
-                return Ok(2);
+                return Ok(err.exit_code());
             }
 
             let start = std::time::Instant::now();
@@ -1341,7 +1364,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                         } else {
                             eprintln!("Update failed: {e}");
                             eprintln!(
-                                "You can update manually: cargo install agent-search --locked"
+                                "You can update manually: cargo install --git https://github.com/alepar/search-cli --locked"
                             );
                         }
                         Ok(err.exit_code())

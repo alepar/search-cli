@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+Changes:
+- Fused modes (general, news, academic, reddit, deep, scholar) wait for
+  every provider instead of stopping once enough results arrived. Each
+  provider still stops at its own timeout, so the slowest provider bounds
+  the search; ranking now fuses over everyone. `providers_cancelled` stays
+  in the envelope and is empty in normal runs.
+
+Fixes:
+- `-c` above a provider's per-request maximum no longer fails the request:
+  Brave web (20), Jina (20) and the others are clamped, and fusion makes up
+  the total.
+- News mode: Brave news results were never parsed (always empty); Serper
+  news returned nothing for counts above 10.
+
 ## 0.12.0 — 2026-10-31
 
 Security:

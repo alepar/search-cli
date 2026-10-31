@@ -51,9 +51,8 @@ results), `-c N` (1-100 results).
   first (`extra.also_found_by` shows consensus). Ordering is deterministic.
 - `answers[]` carries AI-synthesized answers (Perplexity/Tavily) separately —
   every `results[].url` is a fetchable web URL.
-- `metadata.provider_results` shows who contributed what;
-  `providers_cancelled` were cut off after enough results arrived (never in
-  `deep` mode); `warnings` flags filters a provider silently ignores;
+- `metadata.provider_results` shows who contributed what; every provider in
+  the mode is waited for (each within its own timeout); `warnings` flags filters a provider silently ignores;
   `cached: true` marks a replay from the 5-minute local cache.
 - Filters: `-f day|week|month|year`, `-d domain.com`, `--exclude-domain`. In
   `social` mode `-d`/`--exclude-domain` filter X *handles* (max 20; use one

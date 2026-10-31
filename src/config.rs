@@ -499,14 +499,24 @@ fn write_config_atomic(path: &std::path::Path, doc: &toml::Table) -> Result<(), 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, doc.to_string())?;
+    // Per-process temp name, so two writers never share (and truncate) one
+    // temp file; created 0600 rather than chmodded after the keys are in it.
+    let tmp = path.with_extension(format!("toml.{}.tmp", std::process::id()));
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
     }
-    std::fs::rename(&tmp, path)?;
+    let written = opts
+        .open(&tmp)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, doc.to_string().as_bytes()))
+        .and_then(|()| std::fs::rename(&tmp, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written?;
     Ok(())
 }
 
@@ -528,7 +538,12 @@ fn parse_setting(name: &str, value: &str) -> Result<toml::Value, SearchError> {
                     "settings.{name} must be a non-negative integer, got '{value}'"
                 ))
             })?;
-            Ok(toml::Value::Integer(n as i64))
+            // TOML integers are i64; a wrapped negative would brick the
+            // config for every later command, `config set` included.
+            let n = i64::try_from(n).map_err(|_| {
+                SearchError::Config(format!("settings.{name} is too large: {value}"))
+            })?;
+            Ok(toml::Value::Integer(n))
         }
         "email" => Ok(toml::Value::String(value.to_string())),
         other => Err(SearchError::Config(format!(
@@ -685,7 +700,7 @@ pub fn config_check(config: &AppConfig) {
 
 #[cfg(test)]
 mod tests {
-    use super::{mask_key, parse_setting};
+    use super::{mask_key, parse_setting, write_config_atomic};
 
     #[test]
     fn mask_key_never_panics_on_multibyte() {
@@ -708,5 +723,24 @@ mod tests {
         ));
         assert!(parse_setting("timeout", "abc").is_err());
         assert!(parse_setting("unknown_setting", "1").is_err());
+        // u64::MAX used to wrap to -1 and brick the config.
+        assert!(parse_setting("timeout", "18446744073709551615").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_file_is_written_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("search-cfg-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let mut doc = toml::Table::new();
+        doc.insert("k".into(), toml::Value::String("secret".into()));
+        write_config_atomic(&path, &doc).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        let leftovers = std::fs::read_dir(&dir).unwrap().count();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(mode, 0o600);
+        assert_eq!(leftovers, 1, "temp file left behind");
     }
 }
