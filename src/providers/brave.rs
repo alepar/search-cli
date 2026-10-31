@@ -64,7 +64,10 @@ fn map_freshness(f: &str) -> &str {
 }
 
 /// Brave web search's documented maximum `count`.
-const WEB_MAX_COUNT: usize = 20;
+// Documented per-request maxima; a larger count fails the request with 422.
+pub(super) const WEB_MAX_COUNT: usize = 20;
+pub(super) const NEWS_MAX_COUNT: usize = 50;
+pub(super) const LLM_CONTEXT_MAX_COUNT: usize = 50;
 
 /// Append site: operators for domain filtering
 fn augment_query(query: &str, opts: &SearchOpts) -> String {
@@ -105,7 +108,6 @@ impl super::Provider for Brave {
 
         let client = &self.ctx.client;
         let api_key = self.api_key();
-        // Web search documents count 1..=20; more fails the request.
         let count_str = count.min(WEB_MAX_COUNT).to_string();
         let q = augment_query(query, opts);
         let freshness = opts.freshness.as_deref().map(map_freshness);
@@ -186,7 +188,7 @@ impl super::Provider for Brave {
 
         let client = &self.ctx.client;
         let api_key = self.api_key();
-        let count_str = count.to_string();
+        let count_str = count.min(NEWS_MAX_COUNT).to_string();
         let q = augment_query(query, opts);
         let freshness = opts.freshness.as_deref().map(map_freshness);
 
@@ -257,7 +259,7 @@ impl Brave {
         let client = &self.ctx.client;
         let api_key = self.api_key();
         let q = augment_query(query, opts);
-        let count_str = count.to_string();
+        let count_str = count.min(LLM_CONTEXT_MAX_COUNT).to_string();
         let freshness = opts.freshness.as_deref().map(map_freshness);
 
         super::retry_request(|| async {

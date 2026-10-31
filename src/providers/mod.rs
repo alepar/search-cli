@@ -276,6 +276,23 @@ mod site_operator_tests {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn per_request_counts_stay_within_documented_maxima() {
+        // `-c 30` (recommended for deep mode) used to fail brave web with
+        // 422 and jina with 400; fusion handles the total, each request
+        // must stay within the provider's cap.
+        assert_eq!(super::brave::WEB_MAX_COUNT, 20);
+        assert_eq!(super::brave::NEWS_MAX_COUNT, 50);
+        assert_eq!(super::brave::LLM_CONTEXT_MAX_COUNT, 50);
+        assert_eq!(super::jina::MAX_COUNT, 20);
+        assert_eq!(super::serper::MAX_COUNT, 100);
+        assert_eq!(super::serpapi::max_count("google_scholar"), 20);
+        assert_eq!(super::serpapi::max_count("google"), 100);
+        assert_eq!(super::exa::MAX_COUNT, 100);
+        assert_eq!(super::firecrawl::MAX_COUNT, 100);
+        assert_eq!(super::parallel::MAX_COUNT, 40);
+    }
+
+    #[test]
     fn html_to_text_strips_tags_scripts_and_styles() {
         let html = "<html><head><style>p{color:red}</style><SCRIPT>var a = '<b>';</SCRIPT></head>\
                     <body><p>Hello</p><p>world</p></body></html>";

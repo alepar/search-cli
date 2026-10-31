@@ -36,6 +36,9 @@ struct ParallelResult {
 /// Request body for POST /v1/search. v1 rejects unknown fields, and every
 /// tuning knob (result count, excerpt size, location, source policy) lives
 /// under `advanced_settings`.
+/// Parallel accepts max_results 1..=40.
+pub(super) const MAX_COUNT: usize = 40;
+
 fn build_body(query: &str, count: usize, opts: &SearchOpts) -> serde_json::Value {
     let mut source_policy = serde_json::Map::new();
     if !opts.include_domains.is_empty() {
@@ -49,7 +52,7 @@ fn build_body(query: &str, count: usize, opts: &SearchOpts) -> serde_json::Value
     }
 
     let mut advanced = json!({
-        "max_results": count,
+        "max_results": count.min(MAX_COUNT),
         "excerpt_settings": { "max_chars_per_result": 3000 },
     });
     if !source_policy.is_empty() {
@@ -149,6 +152,12 @@ impl super::Provider for Parallel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn max_results_is_capped() {
+        let body = build_body("rust", 50, &SearchOpts::default());
+        assert_eq!(body["advanced_settings"]["max_results"], 40);
+    }
 
     #[test]
     fn v1_body_nests_settings_under_advanced_settings() {

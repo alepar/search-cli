@@ -7,6 +7,9 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Firecrawl search documents limit 1..=100.
+pub(super) const MAX_COUNT: usize = 100;
+
 pub struct Firecrawl {
     ctx: Arc<AppContext>,
 }
@@ -79,7 +82,7 @@ impl super::Provider for Firecrawl {
         let auth = format!("Bearer {}", self.api_key());
         let body = json!({
             "query": query,
-            "limit": count,
+            "limit": count.min(MAX_COUNT),
             "scrapeOptions": { "formats": ["markdown"] }
         });
 

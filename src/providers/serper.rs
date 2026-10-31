@@ -6,6 +6,9 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Google returns at most 100 results per page.
+pub(super) const MAX_COUNT: usize = 100;
+
 pub struct Serper {
     ctx: Arc<AppContext>,
 }
@@ -36,7 +39,7 @@ impl Serper {
         let client = &self.ctx.client;
         let api_key = self.api_key();
 
-        let mut body = json!({ "q": q, "num": count });
+        let mut body = json!({ "q": q, "num": count.min(MAX_COUNT) });
         // Serper freshness via tbs param: qdr:d, qdr:w, qdr:m, qdr:y
         if let Some(f) = &opts.freshness {
             let tbs = match f.as_str() {

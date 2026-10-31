@@ -6,6 +6,9 @@ use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// s.jina.ai rejects count above 20 with HTTP 400.
+pub(super) const MAX_COUNT: usize = 20;
+
 pub struct Jina {
     ctx: Arc<AppContext>,
 }
@@ -66,7 +69,7 @@ impl super::Provider for Jina {
 
         let client = &self.ctx.client;
         let auth = format!("Bearer {}", self.api_key());
-        let count_str = count.to_string();
+        let count_str = count.min(MAX_COUNT).to_string();
 
         // Domain filtering via query operators (Jina has no native filter).
         let q = super::with_site_operators(query, opts);
