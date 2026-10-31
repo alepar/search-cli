@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- extract/scrape: sites that wall off their HTML but publish a sanctioned
+  route are read through it before the scraper chain. Stack Exchange
+  questions use API v2.3 (question plus top 10 answers, CC BY-SA attribution;
+  `STACKEXCHANGE_KEY` raises the keyless 300/day quota). GitHub repos, files
+  and issues/PRs use the REST API (`GITHUB_TOKEN`/`GH_TOKEN` optional; falls
+  back to the chain when rate-limited). Hacker News items use the Algolia API.
+  Medium posts come from the author's or publication's RSS feed when recent
+  enough, otherwise the chain runs. Telegram channels and posts use the
+  t.me/s/ public preview. YouTube videos get oEmbed metadata plus an English
+  transcript when `yt-dlp` is on PATH. LinkedIn, Quora, Glassdoor, Instagram
+  and Discord fail fast with `no_sanctioned_route` (category `blocked`);
+  `-p <provider>` still forces the chain. Routes are pluggable via
+  `sanctioned::Route`.
+- extract/scrape: wall detection measures visible text (markdown link
+  targets excluded) and recognises Quora, Glassdoor and Google block pages.
+
 - xAI: the default model moves from `grok-4-1-fast` (retired 2026-05-15; xAI
   now redirects it to `grok-4.3` at grok-4.3 prices) to `grok-4.3`
   explicitly. The model is configurable via a new `[xai]` section
