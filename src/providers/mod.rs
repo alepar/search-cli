@@ -35,8 +35,10 @@ where
     // dead for the cases it exists for. Permanent 4xx (401/402/400) are NOT
     // retried; that would just burn the budget.
     //
-    // Budget invariant: worst-case backoff (~0.2s + ~0.4s, jittered) plus one
-    // full attempt must fit inside the smallest provider timeout (10s).
+    // The caller's Provider::timeout() bounds the whole retry sequence, so a
+    // slow attempt can use the full budget and leave no room for a retry.
+    // The client has a connect timeout only, so a transport Timeout here is
+    // a connect failure, which is cheap to retry.
     f.retry(
         ExponentialBuilder::default()
             .with_jitter()
