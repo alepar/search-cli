@@ -21,7 +21,7 @@ use clap::{Parser, Subcommand};
           firecrawl  JS-rendered page scraping + structured extraction\n  \
           tavily     RAG-oriented search: general, news, academic, deep\n  \
           serpapi    Many engines (Google, Bing, YouTube, Baidu, Scholar)\n  \
-          perplexity LLM-synthesized answer with citations (Sonar)\n  \
+          perplexity LLM-synthesized answer with citations (Agent API)\n  \
           browserless Cloud browser for Cloudflare/JS-heavy pages\n  \
           stealth    Local anti-bot scraper (no API key)\n  \
           xai        Only real-time X/Twitter search (Grok agentic)\n\n\
@@ -208,7 +208,7 @@ pub struct SearchArgs {
     pub max_chars: Option<usize>,
 
     /// Country code for region-biased results (e.g. gb, de, jp) — applied by
-    /// providers that support it (serper, serpapi, brave, parallel)
+    /// providers that support it (serper, serpapi, brave, parallel, perplexity)
     #[arg(long)]
     pub country: Option<String>,
 

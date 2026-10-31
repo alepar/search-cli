@@ -543,7 +543,7 @@ pub fn config_check(config: &AppConfig) {
             "perplexity",
             &config.keys.perplexity,
             "PERPLEXITY_API_KEY",
-            "AI-powered answers with citations (Perplexity Sonar)",
+            "AI-powered answers with citations (Perplexity Agent API)",
         ),
         (
             "browserless",
