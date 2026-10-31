@@ -22,7 +22,9 @@ fn estimated_cost_per_call(provider: &str) -> f64 {
         "exa" => 0.007,
         "tavily" => 0.010,
         "serpapi" => 0.010,
-        "perplexity" => 0.012,
+        // Agent API `fast` effort: $0.001 Fast Search call + ~5-10k input
+        // and ~500 output tokens on gpt-6-luna at the 2x priority tier (2026-10).
+        "perplexity" => 0.003,
         "browserless" => 0.004,
         // grok-4.3 tokens (~$0.02) plus X Search at $5 per 1k posts fetched
         // (~10-20 posts per call); xAI pricing as of 2026-09.
@@ -31,7 +33,7 @@ fn estimated_cost_per_call(provider: &str) -> f64 {
     }
 }
 
-/// "brave_llm_context" bills as brave; "perplexity_sonar-pro" as perplexity.
+/// "brave_llm_context" bills as brave; "perplexity_fast" as perplexity.
 fn base_provider(name: &str) -> &str {
     name.split('_').next().unwrap_or(name)
 }

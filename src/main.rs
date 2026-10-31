@@ -705,7 +705,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                             {"name": "--max-chars", "type": "integer", "required": false,
                              "description": "Cap each result snippet / answer at N characters — bound how much web content enters your context"},
                             {"name": "--country", "type": "string", "required": false,
-                             "description": "ISO country code (gb, de, jp) for region-biased results; applied by serper/serpapi/brave/parallel"},
+                             "description": "ISO country code (gb, de, jp) for region-biased results; applied by serper/serpapi/brave/parallel/perplexity"},
                             {"name": "--lang", "type": "string", "required": false,
                              "description": "Language code (en, de) for results; applied by serper/serpapi/brave"},
                             {"name": "--allow-private", "type": "bool", "required": false, "default": false,

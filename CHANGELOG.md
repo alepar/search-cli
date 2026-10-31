@@ -15,6 +15,16 @@
   exclusive, so `-f day` previously returned only yesterday's posts.
 - `search stats` estimates $0.08 per xAI call (grok-4.3 tokens plus X Search
   at $5 per 1,000 posts fetched), up from $0.05.
+- Perplexity moved off the retired Sonar `/chat/completions` endpoint (end of
+  support 2026-09-27) to the Agent API (`POST /v1/agent`) with the `fast`
+  effort level, Perplexity's documented replacement for `sonar-pro`. Output is
+  unchanged in shape: an answer in `answers[]` (now labelled
+  `perplexity_fast`) plus its cited sources. `-d`/`--exclude-domain` and `-f`
+  now go explicitly on the `web_search` tool's filters; when both include and
+  exclude domains are given, only the allowlist is sent (the API accepts one
+  mode per request, and the old code mixed them). `--country` is now forwarded
+  as `user_location.country`. `search stats` estimates $0.003 per call, down
+  from $0.012.
 
 ## 0.10.0 — 2026-10-31
 

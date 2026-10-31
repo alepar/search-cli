@@ -158,7 +158,7 @@ search "query" --json
 #   "query": "...",
 #   "mode": "general",
 #   "results": [...],                              // rank-fused, deduped
-#   "answers": [{"provider": "perplexity_sonar", "text": "..."}],
+#   "answers": [{"provider": "perplexity_fast", "text": "..."}],
 #   "metadata": {
 #     "elapsed_ms": 1542,
 #     "result_count": 10,
@@ -230,7 +230,7 @@ search "query" 2>/dev/null             # suppress diagnostics
 | **[Firecrawl](https://firecrawl.dev/)** | JavaScript rendering, structured extraction | Dynamic pages, SPAs, data extraction |
 | **[Tavily](https://tavily.com/)** | General + deep search, research-focused | Broad coverage, research queries |
 | **[SerpApi](https://serpapi.com/)** | Many engines: Google, Bing, YouTube, Baidu | Multi-engine coverage; only provider with a real balance API |
-| **[Perplexity](https://perplexity.ai/)** | LLM-synthesized answer with citations (Sonar) | When you want an answer with sources, not raw pages |
+| **[Perplexity](https://perplexity.ai/)** | LLM-synthesized answer with citations (Agent API, `fast` effort) | When you want an answer with sources, not raw pages |
 | **Browserless** | Cloud browser for Cloudflare/JS-heavy pages | Anti-bot bypass, pages that need a real browser |
 | **Stealth** | Built-in anti-bot scraper | Protected pages, no API key needed |
 | **[xAI](https://x.ai/)** | Only provider with native real-time X/Twitter search (Grok) | Live social signal, trending topics, account activity |
