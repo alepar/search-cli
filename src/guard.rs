@@ -102,20 +102,45 @@ fn blocked(target: &str) -> SearchError {
 fn is_private(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
+            let [a, b, c, _] = v4.octets();
             v4.is_loopback()
                 || v4.is_private()
                 || v4.is_link_local() // includes 169.254.169.254 metadata
                 || v4.is_unspecified()
                 || v4.is_broadcast()
-                || v4.octets()[0] == 100 && (64..128).contains(&v4.octets()[1]) // CGNAT 100.64/10
+                || v4.is_multicast() // 224/4
+                || a == 0 // "this network" 0/8
+                || a >= 240 // reserved 240/4
+                || a == 100 && (64..128).contains(&b) // CGNAT 100.64/10
+                || (a, b, c) == (192, 0, 0) // IETF protocol assignments
+                || a == 198 && (b == 18 || b == 19) // benchmarking 198.18/15
         }
         IpAddr::V6(v6) => {
+            let seg = v6.segments();
             v6.is_loopback()
                 || v6.is_unspecified()
-                || (v6.segments()[0] & 0xfe00) == 0xfc00 // unique-local fc00::/7
-                || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
-                || v6.to_ipv4_mapped().is_some_and(|m| is_private(IpAddr::V4(m)))
+                || v6.is_multicast()
+                || (seg[0] & 0xfe00) == 0xfc00 // unique-local fc00::/7
+                || (seg[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
+                || (seg[0] & 0xffc0) == 0xfec0 // site-local fec0::/10 (deprecated)
+                || embedded_v4(seg).is_some_and(|v4| is_private(IpAddr::V4(v4)))
         }
+    }
+}
+
+/// The IPv4 address an IPv6 address carries and routes to: mapped
+/// (::ffff:0:0/96), compatible (::/96), NAT64 (64:ff9b::/96 and
+/// 64:ff9b:1::/48) and 6to4 (2002::/16).
+fn embedded_v4(seg: [u16; 8]) -> Option<std::net::Ipv4Addr> {
+    let v4 = |hi: u16, lo: u16| {
+        std::net::Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8)
+    };
+    match seg {
+        [0, 0, 0, 0, 0, 0xffff, hi, lo] | [0, 0, 0, 0, 0, 0, hi, lo] => Some(v4(hi, lo)),
+        [0x64, 0xff9b, 0, 0, 0, 0, hi, lo] => Some(v4(hi, lo)),
+        [0x64, 0xff9b, 1, ..] => Some(v4(seg[6], seg[7])),
+        [0x2002, hi, lo, ..] => Some(v4(hi, lo)),
+        _ => None,
     }
 }
 
@@ -159,6 +184,26 @@ mod tests {
         assert!(!ok("http://[::1]/").await);
         assert!(!ok("http://[fe80::1]/").await);
         assert!(!ok("http://[::ffff:127.0.0.1]/").await);
+    }
+
+    #[tokio::test]
+    async fn blocks_private_v4_embedded_in_v6_and_reserved_ranges() {
+        for u in [
+            "http://[64:ff9b::a9fe:a9fe]/", // NAT64 of 169.254.169.254
+            "http://[64:ff9b:1::a9fe:a9fe]/",
+            "http://[::127.0.0.1]/",      // IPv4-compatible
+            "http://[2002:a9fe:a9fe::]/", // 6to4 of 169.254.169.254
+            "http://[fec0::1]/",          // site-local
+            "http://[ff02::1]/",          // multicast
+            "http://0.0.0.1/",
+            "http://192.0.0.8/",
+            "http://198.18.0.1/",
+            "http://224.0.0.1/",
+            "http://240.0.0.1/",
+        ] {
+            assert!(!ok(u).await, "{u} should be blocked");
+        }
+        assert!(ok("http://[64:ff9b::101:101]/").await, "NAT64 of 1.1.1.1");
     }
 
     #[tokio::test]
