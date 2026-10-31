@@ -15,6 +15,7 @@ use url::Url;
 mod github;
 mod hackernews;
 mod medium;
+mod scholarly;
 mod stackexchange;
 mod telegram;
 mod walled;
@@ -41,7 +42,8 @@ pub fn routes(ctx: Arc<AppContext>) -> Vec<Box<dyn Route>> {
         Box::new(hackernews::HackerNews::new(ctx.clone())),
         Box::new(medium::Medium::new(ctx.clone())),
         Box::new(telegram::Telegram::new(ctx.clone())),
-        Box::new(youtube::YouTube::new(ctx)),
+        Box::new(youtube::YouTube::new(ctx.clone())),
+        Box::new(scholarly::Scholarly::new(ctx)),
         Box::new(walled::Walled),
     ]
 }
@@ -144,12 +146,15 @@ pub(crate) fn html_fragment_to_text(html: &str) -> String {
                 in_pre = !closing;
                 out.push_str("\n```\n");
             }
-            "script" | "style" if !closing => {
+            // MathML annotations repeat each formula as TeX source.
+            "script" | "style" | "annotation" if !closing => {
+                // Tags are almost always lowercase; lowercasing the rest of a
+                // large page per skipped element would be quadratic.
                 let end = format!("</{name}");
-                rest = rest
-                    .to_ascii_lowercase()
+                let at = rest
                     .find(&end)
-                    .map_or("", |i| &rest[i..]);
+                    .or_else(|| rest.to_ascii_lowercase().find(&end));
+                rest = at.map_or("", |i| &rest[i..]);
             }
             "br" => out.push('\n'),
             "li" if !closing => out.push_str("\n- "),
@@ -305,6 +310,11 @@ mod tests {
         );
         assert_eq!(name("https://t.me/durov"), Some("telegram"));
         assert_eq!(name("https://youtu.be/dQw4w9WgXcQ"), Some("youtube"));
+        assert_eq!(
+            name("https://doi.org/10.1038/nature14539"),
+            Some("scholarly")
+        );
+        assert_eq!(name("https://arxiv.org/abs/1706.03762"), Some("scholarly"));
         assert_eq!(name("https://www.linkedin.com/in/someone"), Some("walled"));
         assert_eq!(name("https://en.wikipedia.org/wiki/Rust"), None);
         // Paths a route cannot serve fall through to the chain.

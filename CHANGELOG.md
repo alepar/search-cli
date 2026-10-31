@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- extract/scrape: papers are read by identifier instead of through
+  publisher pages, which sit behind bot walls and robots rules naming AI
+  agents. A DOI (doi.org or embedded in a publisher URL or query), arXiv id,
+  PubMed/PMC id, nature.com article or ScienceDirect PII resolves through
+  OpenAlex, with Crossref (metadata) and Unpaywall (open-access copy) when
+  OpenAlex lacks the work. Full text comes from Europe PMC, arXiv's HTML
+  rendering, or the open-access landing page; otherwise the result is
+  metadata, abstract and OA links. New `settings.email`
+  (`SEARCH_SETTINGS_EMAIL`) is sent as the Crossref/OpenAlex polite-pool
+  contact and enables Unpaywall, which requires it.
+
 ## 0.11.0 — 2026-10-31
 
 Behaviour changes: the Perplexity answer label is now `perplexity_fast`

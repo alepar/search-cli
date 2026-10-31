@@ -131,7 +131,7 @@ pub const MODES: &[ModeSpec] = &[
         input: InputKind::Url,
         merge: MergeKind::Chain,
         providers: &["stealth", "jina", "firecrawl", "browserless"],
-        description: "Full page content as markdown. Sites with a sanctioned route are read through it first (Stack Exchange API, GitHub API, HN Algolia, Medium RSS, Telegram t.me/s, YouTube oEmbed + yt-dlp transcript); login-only sites (LinkedIn, Quora, Glassdoor, Instagram, Discord) fail fast with no_sanctioned_route. Otherwise tries stealth (opt-in build), Jina Reader, Firecrawl, and Browserless until one returns content; login walls, bot walls and empty JS shells count as failures (category blocked)",
+        description: "Full page content as markdown. Sites with a sanctioned route are read through it first (Stack Exchange API, GitHub API, HN Algolia, Medium RSS, Telegram t.me/s, YouTube oEmbed + yt-dlp transcript; papers by DOI/arXiv/PubMed/PMC/PII via OpenAlex, Crossref, Unpaywall, Europe PMC and arXiv HTML); login-only sites (LinkedIn, Quora, Glassdoor, Instagram, Discord) fail fast with no_sanctioned_route. Otherwise tries stealth (opt-in build), Jina Reader, Firecrawl, and Browserless until one returns content; login walls, bot walls and empty JS shells count as failures (category blocked)",
         when_to_use: "Reading one specific page. -q must be a full URL. A blocked/no_sanctioned_route failure means the site walls off automated reading: use search results, an archive copy, or ask the user.",
     },
     ModeSpec {
