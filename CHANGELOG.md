@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.12.1 — 2026-10-31
+
+Behaviour changes: fused modes no longer stop early; every configured
+provider contributes unless it fails or hits its own timeout, so the slowest
+provider now bounds latency. `-c` above a provider's per-request maximum is
+clamped per provider instead of failing it.
 
 Changes:
 - Fused modes (general, news, academic, reddit, deep, scholar) wait for
