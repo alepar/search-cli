@@ -116,9 +116,14 @@ fn parse_organic(body: &serde_json::Value, source: &str) -> Vec<SearchResult> {
                         .or_else(|| str_field("website"))
                         .map(String::from)
                         .or_else(|| {
+                            // cid may come back as a string or a number.
                             item.get("cid")
-                                .and_then(|v| v.as_str())
-                                .map(|cid| format!("https://maps.google.com/?cid={cid}"))
+                                .filter(|v| v.is_string() || v.is_u64())
+                                .map(|cid| {
+                                    let cid =
+                                        cid.as_str().map_or_else(|| cid.to_string(), String::from);
+                                    format!("https://maps.google.com/?cid={cid}")
+                                })
                         })
                         .unwrap_or_default();
                     let snippet = str_field("snippet")
