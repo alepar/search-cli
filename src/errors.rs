@@ -5,7 +5,9 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum SearchError {
-    #[error("API error from {provider}: {message}")]
+    // Every variant that can carry provider or transport text redacts it in
+    // Display, so any `{e}` (logs, doctor, usage, envelopes) is safe to print.
+    #[error("API error from {provider}: {}", redact_secrets(.message))]
     Api {
         provider: &'static str,
         code: &'static str,
@@ -16,7 +18,7 @@ pub enum SearchError {
 
     /// The site walls off automated retrieval (bot or login wall), or has no
     /// sanctioned route for it.
-    #[error("{provider}: {message}")]
+    #[error("{provider}: {}", redact_secrets(.message))]
     Blocked {
         provider: &'static str,
         code: &'static str,
@@ -29,7 +31,7 @@ pub enum SearchError {
     #[error("Rate limited by {provider}")]
     RateLimited { provider: &'static str },
 
-    #[error("Configuration error: {0}")]
+    #[error("Configuration error: {}", redact_secrets(.0))]
     Config(String),
 
     #[error("No providers configured for mode '{0}'")]
@@ -44,11 +46,11 @@ pub enum SearchError {
     #[error("DNS resolver error: {0}")]
     Resolver(String),
 
-    #[error(transparent)]
+    #[error("{}", redact_secrets(&.0.to_string()))]
     Http(#[from] reqwest::Error),
 
     #[cfg(feature = "stealth")]
-    #[error(transparent)]
+    #[error("{}", redact_secrets(&.0.to_string()))]
     Wreq(#[from] wreq::Error),
 
     #[error(transparent)]
@@ -275,6 +277,32 @@ mod tests {
             "body: {\"token=REDACTED def\"}"
         );
         assert_eq!(redact_secrets("no secrets here"), "no secrets here");
+    }
+
+    #[tokio::test]
+    async fn transport_error_display_redacts_the_url_key() {
+        // Port 1 on loopback refuses the connection; reqwest's error Display
+        // then echoes the full URL, query-string key included.
+        let e = reqwest::Client::new()
+            .get("http://127.0.0.1:1/account.json?api_key=SECRET123")
+            .send()
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("SECRET123"), "precondition: {e}");
+        let shown = SearchError::from(e).to_string();
+        assert!(!shown.contains("SECRET123"), "{shown}");
+        assert!(shown.contains("api_key=REDACTED"), "{shown}");
+    }
+
+    #[test]
+    fn api_error_display_redacts_echoed_keys() {
+        let e = SearchError::Api {
+            provider: "x",
+            code: "api_error",
+            message: "HTTP 401: bad key=SECRET123".into(),
+            status: Some(401),
+        };
+        assert!(!e.to_string().contains("SECRET123"));
     }
 
     fn api(status: u16) -> SearchError {
