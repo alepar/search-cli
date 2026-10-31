@@ -104,7 +104,7 @@ search "your query here"
 1. **Parse** -- Clap parses your query, mode, provider filter, and output preferences
 2. **Route** -- Your mode determines which providers to query (or you override with `-p`)
 3. **Fan out** -- `tokio::JoinSet` fires all providers in parallel with per-provider timeouts
-4. **Collect** -- Once enough unique results arrive, stragglers get a 1.5s grace window, then are cancelled (reported in `metadata.providers_cancelled`; `deep` mode always waits for everyone)
+4. **Collect** -- Every provider in the mode contributes unless it fails or hits its own timeout, so the slowest provider's budget bounds the search
 5. **Fuse** -- Reciprocal rank fusion: URLs returned by multiple providers rank first (`extra.also_found_by` records consensus); ordering is deterministic, not fastest-provider-first
 6. **Separate answers** -- AI-synthesized answers (Perplexity/Tavily) land in `answers[]`, so every `results[].url` is a fetchable web URL
 7. **Render** -- JSON envelope when piped, colored terminal table when interactive
@@ -182,7 +182,7 @@ use.
 
 ### Rank Fusion, Not Fastest-Provider-First
 
-Most meta-search tools return results in whatever order providers answer, so result #1 is the fastest API's opinion. `search` scores every URL across all providers (RRF, k=60): consensus ranks first, ordering is deterministic, and each result carries `extra.also_found_by` so you can see which engines agreed. The envelope tells you exactly what happened — who contributed (`provider_results`), who was cancelled (`providers_cancelled`), which filters a provider ignored (`warnings`), and whether you got a cached replay (`cached`).
+Most meta-search tools return results in whatever order providers answer, so result #1 is the fastest API's opinion. `search` scores every URL across all providers (RRF, k=60): consensus ranks first, ordering is deterministic, and each result carries `extra.also_found_by` so you can see which engines agreed. The envelope tells you exactly what happened — who contributed (`provider_results`), which filters a provider ignored (`warnings`), and whether you got a cached replay (`cached`).
 
 ### Agent-First Design
 
@@ -204,8 +204,7 @@ search "query" --json
 #     "elapsed_ms": 1542,
 #     "result_count": 10,
 #     "providers_queried": ["brave", "serper", "exa", "jina"],
-#     "provider_results": {"brave": 10, "serper": 10},  // who contributed
-#     "providers_cancelled": ["jina"],             // cut off after enough results
+#     "provider_results": {"brave": 10, "serper": 10, "exa": 10},  // who contributed
 #     "warnings": []                               // e.g. filters a provider ignored
 #   }
 # }

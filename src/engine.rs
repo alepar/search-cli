@@ -8,17 +8,11 @@ use crate::types::{
     SearchResponse, SearchResult, ENVELOPE_VERSION,
 };
 use crate::walls;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
 use tokio::time::timeout;
-
-/// Once enough unique results have arrived, in-flight providers get this long
-/// to land before being cancelled. Long enough for the second/third-fastest
-/// providers to contribute (so fusion has consensus to rank on), short enough
-/// that one slow provider doesn't hold the response hostage.
-const EARLY_STOP_GRACE: Duration = Duration::from_millis(1500);
 
 /// Reciprocal-rank-fusion constant (standard k=60): dampens the gap between
 /// rank 1 and rank 2 so cross-provider consensus outweighs any single
@@ -135,73 +129,13 @@ pub async fn execute_search(
         }
     }
 
-    // Per-provider result buckets, fused after collection. Early-stop: once
-    // enough unique results exist, in-flight providers get EARLY_STOP_GRACE
-    // to land, then are cancelled. Deep mode never cancels — coverage is its
-    // entire purpose.
-    let mut buckets: Vec<(String, Vec<SearchResult>)> = Vec::new();
-    let mut providers_failed = Vec::new();
-    let mut provider_failures: Vec<ProviderFailure> = Vec::new();
-    let mut unique_urls = HashSet::new();
-    let mut deadline: Option<tokio::time::Instant> = None;
-
-    loop {
-        let join_result = match deadline {
-            Some(d) => match tokio::time::timeout_at(d, set.join_next()).await {
-                Ok(r) => r,
-                Err(_) => {
-                    // Grace expired: cancel stragglers, then drain without a
-                    // deadline so already-finished tasks aren't lost.
-                    set.abort_all();
-                    deadline = None;
-                    continue;
-                }
-            },
-            None => set.join_next().await,
-        };
-        let Some(join_result) = join_result else {
-            break;
-        };
-        match join_result {
-            Ok((name, Ok(Ok(items)))) => {
-                let mut items: Vec<SearchResult> = if reddit {
-                    items
-                        .into_iter()
-                        .filter_map(providers::reddit::to_thread_result)
-                        .collect()
-                } else {
-                    items
-                };
-                // An empty URL is not a fetchable result (and would merge
-                // every such result into one in fusion).
-                items.retain(|r| !r.url.trim().is_empty());
-                // Answers move out of results below, so they must not count
-                // toward -c and arm the early stop.
-                for item in items.iter().filter(|r| !is_synthetic_answer(r)) {
-                    unique_urls.insert(normalize_url(&item.url));
-                }
-                buckets.push((name.to_string(), items));
-                if mode != Mode::Deep && deadline.is_none() && unique_urls.len() >= count {
-                    deadline = Some(tokio::time::Instant::now() + EARLY_STOP_GRACE);
-                }
-            }
-            Ok((name, Ok(Err(e)))) => {
-                tracing::warn!("{name}: {e}");
-                provider_failures.push(e.to_provider_failure(name));
-                providers_failed.push(name.to_string());
-            }
-            Ok((name, Err(_))) => {
-                tracing::warn!("{name}: timed out");
-                provider_failures.push(timeout_failure(name));
-                providers_failed.push(name.to_string());
-            }
-            Err(e) => {
-                if !e.is_cancelled() {
-                    tracing::error!("join error: {e}");
-                }
-            }
-        }
-    }
+    // Every provider contributes unless it fails or hits its own timeout;
+    // fusion ranks over all of them, so there is no early stop.
+    let Collected {
+        mut buckets,
+        providers_failed,
+        provider_failures,
+    } = collect(set, reddit).await;
 
     // Synthetic AI answers (non-http pseudo-URLs like perplexity://answer)
     // move to the answers field: they aren't fetchable web results and must
@@ -280,6 +214,64 @@ pub async fn execute_search(
             provider_failures,
         },
     })
+}
+
+type ProviderOutcome = (
+    &'static str,
+    Result<Result<Vec<SearchResult>, SearchError>, tokio::time::error::Elapsed>,
+);
+
+struct Collected {
+    buckets: Vec<(String, Vec<SearchResult>)>,
+    providers_failed: Vec<String>,
+    provider_failures: Vec<ProviderFailure>,
+}
+
+/// Waits for every spawned provider. Each task is already bounded by its
+/// provider's timeout, so the slowest budget bounds the whole search.
+async fn collect(mut set: JoinSet<ProviderOutcome>, reddit: bool) -> Collected {
+    let mut buckets: Vec<(String, Vec<SearchResult>)> = Vec::new();
+    let mut providers_failed = Vec::new();
+    let mut provider_failures: Vec<ProviderFailure> = Vec::new();
+
+    while let Some(join_result) = set.join_next().await {
+        match join_result {
+            Ok((name, Ok(Ok(items)))) => {
+                let mut items: Vec<SearchResult> = if reddit {
+                    items
+                        .into_iter()
+                        .filter_map(providers::reddit::to_thread_result)
+                        .collect()
+                } else {
+                    items
+                };
+                // An empty URL is not a fetchable result (and would merge
+                // every such result into one in fusion).
+                items.retain(|r| !r.url.trim().is_empty());
+                buckets.push((name.to_string(), items));
+            }
+            Ok((name, Ok(Err(e)))) => {
+                tracing::warn!("{name}: {e}");
+                provider_failures.push(e.to_provider_failure(name));
+                providers_failed.push(name.to_string());
+            }
+            Ok((name, Err(_))) => {
+                tracing::warn!("{name}: timed out");
+                provider_failures.push(timeout_failure(name));
+                providers_failed.push(name.to_string());
+            }
+            Err(e) => {
+                if !e.is_cancelled() {
+                    tracing::error!("join error: {e}");
+                }
+            }
+        }
+    }
+    Collected {
+        buckets,
+        providers_failed,
+        provider_failures,
+    }
 }
 
 /// True for provider-synthesized answers smuggled in as results under a
@@ -842,8 +834,11 @@ pub async fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::{fuse_rrf, is_synthetic_answer, normalize_url};
+    use super::{collect, fuse_rrf, is_synthetic_answer, normalize_url, ProviderOutcome};
     use crate::types::SearchResult;
+    use std::time::Duration;
+    use tokio::task::JoinSet;
+    use tokio::time::timeout;
 
     fn result(url: &str, source: &str) -> SearchResult {
         SearchResult {
@@ -855,6 +850,33 @@ mod tests {
             image_url: None,
             extra: None,
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn every_provider_contributes_even_after_enough_results() {
+        // The fast provider alone fills -c; the slow one must still be
+        // waited for and fused, and one past its budget counts as failed.
+        let mut set: JoinSet<ProviderOutcome> = JoinSet::new();
+        set.spawn(async {
+            let r = (0..10).map(|i| result(&format!("https://fast.example/{i}"), "fast"));
+            ("fast", Ok(Ok(r.collect())))
+        });
+        set.spawn(async {
+            tokio::time::sleep(Duration::from_secs(8)).await;
+            (
+                "slow",
+                Ok(Ok(vec![result("https://slow.example/", "slow")])),
+            )
+        });
+        set.spawn(async {
+            let r = timeout(Duration::from_secs(10), std::future::pending()).await;
+            ("stuck", r)
+        });
+        let c = collect(set, false).await;
+        let mut names: Vec<_> = c.buckets.iter().map(|(n, _)| n.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["fast", "slow"]);
+        assert_eq!(c.providers_failed, ["stuck"]);
     }
 
     #[test]
