@@ -1,7 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.11.0 — 2026-10-31
 
+Behaviour changes: the Perplexity answer label is now `perplexity_fast`
+(was `perplexity_sonar-pro`); the stealth scraper is no longer a default
+feature; `search update` no longer prompts for confirmation.
+
+- Extract chain: login walls, bot-challenge pages and JavaScript-only shells
+  are now treated as failed extractions (`blocked`) instead of successes, so
+  the chain escalates and suggests a sanctioned route where one exists.
 - extract/scrape: sites that wall off their HTML but publish a sanctioned
   route are read through it before the scraper chain. Stack Exchange
   questions use API v2.3 (question plus top 10 answers, CC BY-SA attribution;

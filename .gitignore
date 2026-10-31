@@ -2,3 +2,6 @@
 .claude/
 .DS_Store
 **/.DS_Store
+
+# local secrets
+*.key
