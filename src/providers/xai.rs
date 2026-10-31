@@ -50,13 +50,12 @@ impl Xai {
         }
 
         let mut x_search_tool = json!({"type": "x_search"});
-        if let Some(config) = x_search_config {
-            if let (Some(tool_obj), Some(config_obj)) =
+        if let Some(config) = x_search_config
+            && let (Some(tool_obj), Some(config_obj)) =
                 (x_search_tool.as_object_mut(), config.as_object())
-            {
-                for (k, v) in config_obj {
-                    tool_obj.insert(k.clone(), v.clone());
-                }
+        {
+            for (k, v) in config_obj {
+                tool_obj.insert(k.clone(), v.clone());
             }
         }
 
@@ -189,10 +188,10 @@ fn extract_text(resp: &XaiResponse) -> String {
             if item.item_type.as_deref() == Some("message") {
                 if let Some(content) = &item.content {
                     for c in content {
-                        if c.content_type.as_deref() == Some("output_text") {
-                            if let Some(text) = &c.text {
-                                parts.push(text.clone());
-                            }
+                        if c.content_type.as_deref() == Some("output_text")
+                            && let Some(text) = &c.text
+                        {
+                            parts.push(text.clone());
                         }
                     }
                 }
@@ -214,24 +213,21 @@ fn extract_citations(resp: &XaiResponse) -> Vec<String> {
                     // Extract from url_citation annotations (primary method)
                     if let Some(annotations) = &c.annotations {
                         for ann in annotations {
-                            if ann.annotation_type.as_deref() == Some("url_citation") {
-                                if let Some(url) = &ann.url {
-                                    if seen.insert(url.clone()) {
-                                        urls.push(url.clone());
-                                    }
-                                }
+                            if ann.annotation_type.as_deref() == Some("url_citation")
+                                && let Some(url) = &ann.url
+                                && seen.insert(url.clone())
+                            {
+                                urls.push(url.clone());
                             }
                         }
                     }
                     // Fallback: check for cite/url content types
-                    if c.content_type.as_deref() == Some("cite")
-                        || c.content_type.as_deref() == Some("url")
+                    if (c.content_type.as_deref() == Some("cite")
+                        || c.content_type.as_deref() == Some("url"))
+                        && let Some(url) = &c.url
+                        && seen.insert(url.clone())
                     {
-                        if let Some(url) = &c.url {
-                            if seen.insert(url.clone()) {
-                                urls.push(url.clone());
-                            }
-                        }
+                        urls.push(url.clone());
                     }
                 }
             }

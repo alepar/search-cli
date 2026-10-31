@@ -55,12 +55,14 @@ where
 /// TOML into `config_value`, the full precedence is:
 /// bare env var (e.g. `BRAVE_API_KEY`) > `SEARCH_KEYS_*` env > config file.
 pub fn resolve_key(config_value: &str, env_var: &str) -> String {
-    if let Ok(v) = std::env::var(env_var) {
-        if !v.is_empty() {
-            return v;
-        }
-    }
-    config_value.to_string()
+    pick_key(config_value, std::env::var(env_var).ok())
+}
+
+/// The precedence rule of [`resolve_key`], on an already-read env value.
+fn pick_key(config_value: &str, env_value: Option<String>) -> String {
+    env_value
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| config_value.to_string())
 }
 
 /// Turn a non-2xx reqwest response into a categorized [`SearchError`], preserving
@@ -239,36 +241,27 @@ mod tests {
         assert_eq!(super::html_to_text("<"), "");
     }
 
-    use super::resolve_key;
+    use super::pick_key;
 
-    // Uses uniquely-named env vars so parallel tests don't race on shared state.
+    // Tests the precedence on values, not the process environment: setting
+    // env vars is unsafe in edition 2024 while other test threads run.
     #[test]
     fn env_var_wins_over_config() {
-        let var = "SEARCH_TEST_KEY_ENV_WINS";
-        std::env::set_var(var, "from-env");
-        assert_eq!(resolve_key("from-config", var), "from-env");
-        std::env::remove_var(var);
+        assert_eq!(pick_key("from-config", Some("from-env".into())), "from-env");
     }
 
     #[test]
     fn falls_back_to_config_when_env_unset() {
-        let var = "SEARCH_TEST_KEY_FALLBACK";
-        std::env::remove_var(var);
-        assert_eq!(resolve_key("from-config", var), "from-config");
+        assert_eq!(pick_key("from-config", None), "from-config");
     }
 
     #[test]
     fn empty_env_does_not_shadow_config() {
-        let var = "SEARCH_TEST_KEY_EMPTY";
-        std::env::set_var(var, "");
-        assert_eq!(resolve_key("from-config", var), "from-config");
-        std::env::remove_var(var);
+        assert_eq!(pick_key("from-config", Some(String::new())), "from-config");
     }
 
     #[test]
     fn empty_when_neither_set() {
-        let var = "SEARCH_TEST_KEY_NONE";
-        std::env::remove_var(var);
-        assert_eq!(resolve_key("", var), "");
+        assert_eq!(pick_key("", None), "");
     }
 }

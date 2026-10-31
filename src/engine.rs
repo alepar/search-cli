@@ -315,10 +315,8 @@ fn filter_warnings(active: &[String], opts: &SearchOpts) -> Vec<String> {
                 missing.join(" or ")
             ));
         }
-        if wants_domains {
-            if let Some(note) = support.note {
-                warnings.push(note.to_string());
-            }
+        if wants_domains && let Some(note) = support.note {
+            warnings.push(note.to_string());
         }
     }
     warnings

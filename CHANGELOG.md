@@ -68,6 +68,10 @@
 - Serper places results get a URL (the business website, else a Google Maps
   link from the place's `cid`) and the address as the snippet; places items
   carry no `link`.
+- Maintenance: Rust edition 2024 (MSRV 1.89; the opt-in stealth feature needs
+  1.98), refreshed dependencies (clears the RustSec advisories that turned CI
+  red), self_update 1.3 with SHA256SUMS verification and no interactive prompt
+  in `search update`, weekly CI with Dependabot, and an MSRV job.
 
 ## 0.10.0 — 2026-10-31
 

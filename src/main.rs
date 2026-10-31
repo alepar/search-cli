@@ -414,15 +414,15 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                     ctx,
                 );
             }
-            if let Some(c) = args.count {
-                if c == 0 || c > 100 {
-                    return bail(
-                        errors::SearchError::InvalidInput {
-                            message: format!("-c must be between 1 and 100 (got {c})"),
-                        },
-                        ctx,
-                    );
-                }
+            if let Some(c) = args.count
+                && (c == 0 || c > 100)
+            {
+                return bail(
+                    errors::SearchError::InvalidInput {
+                        message: format!("-c must be between 1 and 100 (got {c})"),
+                    },
+                    ctx,
+                );
             }
 
             // URL-input modes (extract/scrape/similar) take a URL, not a
@@ -449,10 +449,9 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             // into localhost, the LAN, or cloud metadata.
             if matches!(args.mode, types::Mode::Extract | types::Mode::Scrape)
                 && !args.allow_private
+                && let Err(err) = guard::assert_public_url(&args.query).await
             {
-                if let Err(err) = guard::assert_public_url(&args.query).await {
-                    return bail(err, ctx);
-                }
+                return bail(err, ctx);
             }
 
             let count = args
@@ -479,19 +478,20 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 && opts.freshness.is_none()
                 && opts.country.is_none()
                 && opts.lang.is_none();
-            if cacheable && !args.no_cache {
-                if let Some((mut cached, age)) = cache::load_query(&args.query, &mode_str, count) {
-                    cached.metadata.cached = true;
-                    cached.metadata.cache_age_secs = Some(age);
-                    logging::log_search(&cached);
-                    apply_max_chars(&mut cached, args.max_chars);
-                    if ctx.is_json() {
-                        output::json::render(&cached);
-                    } else if !ctx.suppress_human() {
-                        output::table::render(&cached);
-                    }
-                    return Ok(0);
+            if cacheable
+                && !args.no_cache
+                && let Some((mut cached, age)) = cache::load_query(&args.query, &mode_str, count)
+            {
+                cached.metadata.cached = true;
+                cached.metadata.cache_age_secs = Some(age);
+                logging::log_search(&cached);
+                apply_max_chars(&mut cached, args.max_chars);
+                if ctx.is_json() {
+                    output::json::render(&cached);
+                } else if !ctx.suppress_human() {
+                    output::table::render(&cached);
                 }
+                return Ok(0);
             }
 
             // Show spinner for human output (suppressed by --quiet)

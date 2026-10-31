@@ -74,18 +74,18 @@ impl Tavily {
         let mut results = Vec::new();
 
         // Prepend the AI-generated answer if available
-        if let Some(answer) = resp.answer {
-            if !answer.is_empty() {
-                results.push(SearchResult {
-                    title: "AI Answer".to_string(),
-                    url: "tavily://answer".to_string(),
-                    snippet: answer,
-                    source: format!("{source}_answer"),
-                    published: None,
-                    image_url: None,
-                    extra: None,
-                });
-            }
+        if let Some(answer) = resp.answer
+            && !answer.is_empty()
+        {
+            results.push(SearchResult {
+                title: "AI Answer".to_string(),
+                url: "tavily://answer".to_string(),
+                snippet: answer,
+                source: format!("{source}_answer"),
+                published: None,
+                image_url: None,
+                extra: None,
+            });
         }
 
         results.extend(resp.results.into_iter().map(|r| SearchResult {
