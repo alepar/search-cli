@@ -628,11 +628,13 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
 
             // Don't cache empty results — a transient no_results shouldn't be
             // replayed for 5 minutes after the cause clears. (Total failure is
-            // already an Err and never reaches here.) The full response is
-            // cached; --max-chars truncation applies per invocation at render.
+            // already an Err and never reaches here.) Nor a partial success:
+            // a provider blip would be replayed as the answer. The full
+            // response is cached; --max-chars truncation applies per
+            // invocation at render.
             if !response.results.is_empty() {
                 cache::save_last(&response);
-                if cacheable {
+                if cacheable && response.metadata.provider_failures.is_empty() {
                     cache::save_query(&args.query, &mode_str, count, &response);
                 }
             }
