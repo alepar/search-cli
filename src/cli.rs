@@ -23,7 +23,7 @@ use clap::{Parser, Subcommand};
           serpapi    Many engines (Google, Bing, YouTube, Baidu, Scholar)\n  \
           perplexity LLM-synthesized answer with citations (Agent API)\n  \
           browserless Cloud browser for Cloudflare/JS-heavy pages\n  \
-          stealth    Local anti-bot scraper (no API key)\n  \
+          stealth    Local anti-bot scraper (no API key; opt-in build feature)\n  \
           xai        Only real-time X/Twitter search (Grok agentic)\n\n\
         EXAMPLES:\n  \
           search \"rust error handling\"                    # general web search\n  \

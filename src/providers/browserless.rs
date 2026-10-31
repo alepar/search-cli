@@ -74,7 +74,7 @@ impl Browserless {
                 };
                 (title, article.text)
             }
-            _ => (url.to_string(), extract_text_simple(&resp)),
+            _ => (url.to_string(), super::html_to_text(&resp)),
         };
 
         if text.trim().is_empty() {
@@ -96,21 +96,6 @@ impl Browserless {
             extra: None,
         }])
     }
-}
-
-/// Simple HTML tag stripper
-fn extract_text_simple(html: &str) -> String {
-    let mut text = String::with_capacity(html.len() / 3);
-    let mut in_tag = false;
-    for c in html.chars() {
-        match c {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => text.push(c),
-            _ => {}
-        }
-    }
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[async_trait]

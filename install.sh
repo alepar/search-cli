@@ -27,7 +27,7 @@ TARGET="${ARCH_TAG}-${OS_TAG}"
 # Prebuilt binaries exist for macOS (both arches) and Linux x86_64.
 if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then
   echo "No prebuilt binary for aarch64 Linux. Install from source:"
-  echo "  cargo install agent-search --no-default-features"
+  echo "  cargo install --git https://github.com/${REPO}"
   exit 1
 fi
 LATEST=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')

@@ -11,13 +11,17 @@ cargo build
 cargo test
 ```
 
-Requires Rust 1.75+ and Cargo.
+Requires Rust 1.89+ and Cargo.
+
+The optional `stealth` feature (`cargo test --features stealth`) builds
+BoringSSL: it needs Rust 1.98+, cmake, clang and a C++ compiler. CI checks it
+on Linux.
 
 ## Making Changes
 
 1. Fork the repo and create a branch from `master`
 2. Make your changes
-3. Run `cargo test` and `cargo clippy` to check for issues
+3. Run `cargo fmt`, `cargo test` and `cargo clippy --all-targets -- -D warnings`
 4. Open a pull request with a clear description of what you changed and why
 
 ## What We're Looking For

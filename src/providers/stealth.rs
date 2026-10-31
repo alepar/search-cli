@@ -5,8 +5,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
-use wreq::header::{HeaderMap, HeaderValue};
-use wreq_util::Emulation;
+use wreq_util::Profile;
 
 pub struct Stealth {
     _ctx: Arc<AppContext>,
@@ -17,55 +16,16 @@ impl Stealth {
         Self { _ctx: ctx }
     }
 
-    /// Build a wreq client that impersonates Chrome with full TLS fingerprint
+    /// A wreq client with a current Chrome TLS/HTTP2 fingerprint. The
+    /// emulation profile supplies Chrome's own default headers, so nothing
+    /// is layered on top: hand-written client hints went stale and
+    /// contradicted the profile.
     fn build_client() -> Result<wreq::Client, SearchError> {
-        let mut headers = HeaderMap::new();
-
-        // Chrome 136 stealth headers (matches Scrapling's browserforge output)
-        headers.insert(
-            "Accept",
-            HeaderValue::from_static(
-                "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-            ),
-        );
-        headers.insert(
-            "Accept-Language",
-            HeaderValue::from_static("en-US,en;q=0.9"),
-        );
-        headers.insert(
-            "Sec-Ch-Ua",
-            HeaderValue::from_static(
-                r#""Chromium";v="136", "Not_A Brand";v="24", "Google Chrome";v="136""#,
-            ),
-        );
-        headers.insert("Sec-Ch-Ua-Mobile", HeaderValue::from_static("?0"));
-        headers.insert("Sec-Ch-Ua-Platform", HeaderValue::from_static(r#""macOS""#));
-        headers.insert("Sec-Fetch-Dest", HeaderValue::from_static("document"));
-        headers.insert("Sec-Fetch-Mode", HeaderValue::from_static("navigate"));
-        headers.insert("Sec-Fetch-Site", HeaderValue::from_static("none"));
-        headers.insert("Sec-Fetch-User", HeaderValue::from_static("?1"));
-        headers.insert("Upgrade-Insecure-Requests", HeaderValue::from_static("1"));
-        headers.insert("DNT", HeaderValue::from_static("1"));
-        headers.insert("Cache-Control", HeaderValue::from_static("max-age=0"));
-        headers.insert(
-            "Accept-Encoding",
-            HeaderValue::from_static("gzip, deflate, br"),
-        );
-
         wreq::Client::builder()
-            .emulation(Emulation::Chrome136)
-            .default_headers(headers)
+            .emulation(Profile::Chrome149)
             .timeout(Duration::from_secs(30))
             .build()
             .map_err(|e| SearchError::Config(format!("Failed to build stealth client: {e}")))
-    }
-
-    /// Generate a convincing Google referer (Scrapling technique)
-    fn google_referer(url: &Url) -> Option<String> {
-        url.domain().map(|d| {
-            let domain = d.trim_start_matches("www.");
-            format!("https://www.google.com/search?q={domain}")
-        })
     }
 
     pub async fn scrape_url(&self, url_str: &str) -> Result<Vec<SearchResult>, SearchError> {
@@ -73,12 +33,8 @@ impl Stealth {
         let url =
             Url::parse(url_str).map_err(|e| SearchError::Config(format!("Invalid URL: {e}")))?;
 
-        // Set referer to look like we came from Google (Scrapling technique).
         // wreq's IntoUri takes &str (not url::Url); `url` is still used below.
-        let mut req = client.get(url_str);
-        if let Some(referer) = Self::google_referer(&url) {
-            req = req.header("Referer", referer);
-        }
+        let req = client.get(url_str);
 
         let resp = req
             .send()
@@ -116,7 +72,7 @@ impl Stealth {
                 }
                 _ => {
                     // Readability failed or returned empty — fallback
-                    (url_str.to_string(), extract_text_fallback(&html))
+                    (url_str.to_string(), super::html_to_text(&html))
                 }
             }
         };
@@ -140,46 +96,6 @@ impl Stealth {
             extra: None,
         }])
     }
-}
-
-/// Simple fallback: strip all HTML tags and return text
-fn extract_text_fallback(html: &str) -> String {
-    let mut text = String::with_capacity(html.len() / 3);
-    let mut in_tag = false;
-    let mut in_skip = false;
-    let bytes = html.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'<' => {
-                in_tag = true;
-                // Check for <script or <style start
-                let rest = &html[i..];
-                if rest.len() > 7
-                    && (rest[..7].eq_ignore_ascii_case("<script")
-                        || rest[..6].eq_ignore_ascii_case("<style"))
-                {
-                    in_skip = true;
-                }
-                // Check for </script> or </style> end
-                if in_skip
-                    && rest.len() > 8
-                    && (rest[..9].eq_ignore_ascii_case("</script>")
-                        || rest[..8].eq_ignore_ascii_case("</style>"))
-                {
-                    in_skip = false;
-                }
-            }
-            b'>' => {
-                in_tag = false;
-            }
-            _ if !in_tag && !in_skip => text.push(bytes[i] as char),
-            _ => {}
-        }
-        i += 1;
-    }
-    // Collapse whitespace
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[async_trait]

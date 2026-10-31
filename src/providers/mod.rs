@@ -181,6 +181,40 @@ pub trait Provider: Send + Sync {
     ) -> Result<Vec<SearchResult>, SearchError>;
 }
 
+/// Last-resort HTML-to-text for scrapers when readability finds no article:
+/// drops tags and the contents of <script>/<style>, collapses whitespace.
+/// Works on chars, so multi-byte text survives intact.
+pub fn html_to_text(html: &str) -> String {
+    fn starts_with_ci(s: &str, prefix: &str) -> bool {
+        s.as_bytes()
+            .get(..prefix.len())
+            .is_some_and(|b| b.eq_ignore_ascii_case(prefix.as_bytes()))
+    }
+
+    let mut text = String::with_capacity(html.len() / 3);
+    let mut in_tag = false;
+    let mut skip_until: Option<&str> = None;
+    for (i, c) in html.char_indices() {
+        if c == '<' {
+            let rest = &html[i..];
+            match skip_until {
+                Some(end) if starts_with_ci(rest, end) => skip_until = None,
+                None if starts_with_ci(rest, "<script") => skip_until = Some("</script"),
+                None if starts_with_ci(rest, "<style") => skip_until = Some("</style"),
+                _ => {}
+            }
+            in_tag = true;
+            // Tags separate words: "<p>a</p><p>b</p>" reads "a b", not "ab".
+            text.push(' ');
+        } else if c == '>' {
+            in_tag = false;
+        } else if !in_tag && skip_until.is_none() {
+            text.push(c);
+        }
+    }
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 pub fn build_providers(ctx: &Arc<AppContext>) -> Vec<Box<dyn Provider>> {
     vec![
         Box::new(parallel::Parallel::new(ctx.clone())),
@@ -203,6 +237,24 @@ pub fn build_providers(ctx: &Arc<AppContext>) -> Vec<Box<dyn Provider>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn html_to_text_strips_tags_scripts_and_styles() {
+        let html = "<html><head><style>p{color:red}</style><SCRIPT>var a = '<b>';</SCRIPT></head>\
+                    <body><p>Hello</p><p>world</p></body></html>";
+        assert_eq!(super::html_to_text(html), "Hello world");
+    }
+
+    #[test]
+    fn html_to_text_keeps_multibyte_text_after_angle_bracket() {
+        // A multi-byte char right after '<' used to panic on a byte-index
+        // slice; non-ASCII text also came out as Latin-1 mojibake.
+        assert_eq!(
+            super::html_to_text("<é> naïve 日本語 <p>ok"),
+            "naïve 日本語 ok"
+        );
+        assert_eq!(super::html_to_text("<"), "");
+    }
+
     use super::resolve_key;
 
     // Uses uniquely-named env vars so parallel tests don't race on shared state.

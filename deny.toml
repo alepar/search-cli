@@ -1,6 +1,6 @@
 # cargo-deny gate: advisories, licenses, and registry sources.
-# wreq/wreq-util are pre-release pins inherited from the yanked rquest crate —
-# exactly the dependency class this gate exists to watch.
+# Runs with all features, so the opt-in stealth stack (wreq, BoringSSL) is
+# covered too.
 
 [advisories]
 yanked = "deny"
@@ -18,9 +18,6 @@ allow = [
     "Zlib",
     "Unicode-3.0",
     "CDLA-Permissive-2.0",
-    # wreq-util (stealth browser emulation profiles) — LGPL is acceptable for
-    # this standalone binary; revisit if the crate is ever vendored/modified.
-    "LGPL-3.0",
 ]
 
 [sources]

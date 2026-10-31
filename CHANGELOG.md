@@ -25,6 +25,18 @@
   mode per request, and the old code mixed them). `--country` is now forwarded
   as `user_location.country`. `search stats` estimates $0.003 per call, down
   from $0.012.
+- Stealth scraper is now opt-in (`--features stealth`) and no longer in the
+  default build or release binaries. It moves to the stable wreq 0.16 /
+  wreq-util 0.2 line (Chrome 149 profile; needs Rust 1.98+, cmake, clang and
+  a C++ compiler). It now sends only the emulation profile's own headers: the
+  forged Google `Referer` and the hand-written Chrome 136 client hints are
+  gone. Fixes: responses are decompressed (every stealth fetch previously
+  failed with `garbage_content`), and the HTML text fallback no longer panics
+  or garbles non-ASCII text. The stealth build links on Linux; CI builds and
+  tests it there.
+- Install docs point at this fork: install.sh, GitHub Releases, or
+  `cargo install --git https://github.com/alepar/search-cli`. The Homebrew tap
+  and crates.io instructions were upstream's.
 
 ## 0.10.0 — 2026-10-31
 

@@ -17,9 +17,9 @@ name = "search"
 path = "src/main.rs"
 
 [features]
-# The stealth provider needs wreq (BoringSSL), which doesn't link on Linux —
-# build with --no-default-features there; the extract chain starts at jina.
-default = ["stealth"]
+# Opt-in: the stealth scraper impersonates a browser's TLS fingerprint
+# (wreq + BoringSSL). Building it needs cmake, clang and a C++ compiler.
+default = []
 stealth = ["dep:wreq", "dep:wreq-util"]
 
 [dependencies]
@@ -43,8 +43,8 @@ backon = "1"
 url = "2.5.8"
 mimalloc = "0.1.48"
 simd-json = "0.17.0"
-wreq = { version = "=6.0.0-rc.28", features = ["json", "cookies"], optional = true }
-wreq-util = { version = "=3.0.0-rc.11", optional = true }
+wreq = { version = "0.16.3", features = ["json", "cookies", "gzip", "brotli", "deflate", "zstd"], optional = true }
+wreq-util = { version = "0.2.0", optional = true }
 hickory-resolver = { version = "0.26", features = ["tokio"] }
 readability = { version = "0.3", default-features = false }
 
