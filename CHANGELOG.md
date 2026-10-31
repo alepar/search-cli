@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.12.2 — 2026-10-31
+
+- `search agent-info` now states that fused modes wait for every provider and
+  that `-c` is clamped to each provider's per-request maximum.
+
 ## 0.12.1 — 2026-10-31
 
 Behaviour changes: fused modes no longer stop early; every configured
