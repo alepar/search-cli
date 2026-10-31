@@ -3,10 +3,12 @@ pub mod browserless;
 pub mod exa;
 pub mod firecrawl;
 pub mod jina;
+pub mod linkup;
 pub mod parallel;
 pub mod perplexity;
 pub mod serpapi;
 pub mod serper;
+#[cfg(feature = "stealth")]
 pub mod stealth;
 pub mod tavily;
 pub mod xai;
@@ -24,22 +26,133 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, SearchError>>,
 {
+    // Retry only TRANSIENT failures — rate limits, timeouts, network errors,
+    // and 5xx (SearchError::is_retryable). The old predicate matched only
+    // Http(_) transport errors, so 429/503 (mapped to RateLimited/Api before
+    // the predicate saw them) were never retried — backoff was effectively
+    // dead for the cases it exists for. Permanent 4xx (401/402/400) are NOT
+    // retried; that would just burn the budget.
+    //
+    // Budget invariant: worst-case backoff (~0.2s + ~0.4s, jittered) plus one
+    // full attempt must fit inside the smallest provider timeout (10s).
     f.retry(
         ExponentialBuilder::default()
-            .with_min_delay(Duration::from_secs(1))
-            .with_max_delay(Duration::from_secs(4))
-            .with_max_times(3),
+            .with_jitter()
+            .with_min_delay(Duration::from_millis(200))
+            .with_max_delay(Duration::from_millis(800))
+            .with_max_times(2),
     )
-    .when(|e| matches!(e, SearchError::Http(_)))
+    .when(|e| e.is_retryable())
     .await
 }
 
-/// Check config key first, then fall back to standard env var.
+/// Resolve a provider API key. **Environment variable wins over the config
+/// file** — CI/session credentials and a freshly-exported key must be able to
+/// override stale local config. (Previously config won, so an out-of-date
+/// `keys.brave` silently shadowed a working `BRAVE_API_KEY` and every brave
+/// request failed.) Because figment already merges `SEARCH_KEYS_*` env over
+/// TOML into `config_value`, the full precedence is:
+/// bare env var (e.g. `BRAVE_API_KEY`) > `SEARCH_KEYS_*` env > config file.
 pub fn resolve_key(config_value: &str, env_var: &str) -> String {
-    if !config_value.is_empty() {
-        return config_value.to_string();
+    if let Ok(v) = std::env::var(env_var) {
+        if !v.is_empty() {
+            return v;
+        }
     }
-    std::env::var(env_var).unwrap_or_default()
+    config_value.to_string()
+}
+
+/// Turn a non-2xx reqwest response into a categorized [`SearchError`], preserving
+/// a short, sanitized body excerpt so "HTTP 422" becomes
+/// "HTTP 422: The provided subscription token is invalid." Returns the response
+/// unchanged on 2xx. Centralizing this here keeps status/body/429 handling
+/// identical across every provider (previously copy-pasted and drift-prone).
+pub async fn ok_or_api_error(
+    resp: reqwest::Response,
+    provider: &'static str,
+) -> Result<reqwest::Response, SearchError> {
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(resp);
+    }
+    let code = status.as_u16();
+    if code == 429 {
+        // Honor Retry-After (seconds form) up to 2s before surfacing the
+        // error, so the backon retry that follows lands after the window the
+        // provider asked for instead of blind-hammering a throttled API.
+        // Capped so it always fits inside the provider timeout budget.
+        let wait = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .map(|s| s.min(2));
+        if let Some(secs) = wait {
+            tokio::time::sleep(Duration::from_secs(secs)).await;
+        }
+        return Err(SearchError::RateLimited { provider });
+    }
+    // Body is only read on the error path; the success path stays zero-copy.
+    let body = resp.text().await.unwrap_or_default();
+    Err(SearchError::Api {
+        provider,
+        code: "api_error",
+        message: http_error_message(code, &body),
+        status: Some(code),
+    })
+}
+
+/// Format `HTTP <status>` with a sanitized one-line body excerpt when present.
+pub fn http_error_message(status: u16, body: &str) -> String {
+    let excerpt = sanitize_excerpt(body, 200);
+    if excerpt.is_empty() {
+        format!("HTTP {status}")
+    } else {
+        format!("HTTP {status}: {excerpt}")
+    }
+}
+
+/// UTC date `days` ago as `YYYY-MM-DD`, without a date-crate dependency.
+/// Used to translate the CLI's freshness words into provider date floors.
+pub fn date_days_ago(days: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let total_days = now.saturating_sub(days * 86400) / 86400;
+    // Howard Hinnant's civil-from-days algorithm.
+    let z = total_days as i64 + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Days of lookback for a freshness word (day/week/month/year).
+pub fn freshness_days(freshness: &str) -> Option<u64> {
+    match freshness {
+        "day" => Some(1),
+        "week" => Some(7),
+        "month" => Some(30),
+        "year" => Some(365),
+        _ => None,
+    }
+}
+
+/// Collapse whitespace and clip to `max` chars (char-safe, never panics on UTF-8).
+fn sanitize_excerpt(body: &str, max: usize) -> String {
+    let collapsed = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out: String = collapsed.chars().take(max).collect();
+    if collapsed.chars().count() > max {
+        out.push('…');
+    }
+    out
 }
 
 #[async_trait]
@@ -53,9 +166,18 @@ pub trait Provider: Send + Sync {
         Duration::from_secs(10)
     }
 
-    async fn search(&self, query: &str, count: usize, opts: &SearchOpts) -> Result<Vec<SearchResult>, SearchError>;
-    async fn search_news(&self, query: &str, count: usize, opts: &SearchOpts)
-        -> Result<Vec<SearchResult>, SearchError>;
+    async fn search(
+        &self,
+        query: &str,
+        count: usize,
+        opts: &SearchOpts,
+    ) -> Result<Vec<SearchResult>, SearchError>;
+    async fn search_news(
+        &self,
+        query: &str,
+        count: usize,
+        opts: &SearchOpts,
+    ) -> Result<Vec<SearchResult>, SearchError>;
 }
 
 pub fn build_providers(ctx: &Arc<AppContext>) -> Vec<Box<dyn Provider>> {
@@ -65,6 +187,8 @@ pub fn build_providers(ctx: &Arc<AppContext>) -> Vec<Box<dyn Provider>> {
         Box::new(serper::Serper::new(ctx.clone())),
         Box::new(exa::Exa::new(ctx.clone())),
         Box::new(jina::Jina::new(ctx.clone())),
+        Box::new(linkup::Linkup::new(ctx.clone())),
+        #[cfg(feature = "stealth")]
         Box::new(stealth::Stealth::new(ctx.clone())),
         Box::new(firecrawl::Firecrawl::new(ctx.clone())),
         Box::new(tavily::Tavily::new(ctx.clone())),
@@ -73,4 +197,40 @@ pub fn build_providers(ctx: &Arc<AppContext>) -> Vec<Box<dyn Provider>> {
         Box::new(serpapi::SerpApi::new(ctx.clone())),
         Box::new(xai::Xai::new(ctx.clone())),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_key;
+
+    // Uses uniquely-named env vars so parallel tests don't race on shared state.
+    #[test]
+    fn env_var_wins_over_config() {
+        let var = "SEARCH_TEST_KEY_ENV_WINS";
+        std::env::set_var(var, "from-env");
+        assert_eq!(resolve_key("from-config", var), "from-env");
+        std::env::remove_var(var);
+    }
+
+    #[test]
+    fn falls_back_to_config_when_env_unset() {
+        let var = "SEARCH_TEST_KEY_FALLBACK";
+        std::env::remove_var(var);
+        assert_eq!(resolve_key("from-config", var), "from-config");
+    }
+
+    #[test]
+    fn empty_env_does_not_shadow_config() {
+        let var = "SEARCH_TEST_KEY_EMPTY";
+        std::env::set_var(var, "");
+        assert_eq!(resolve_key("from-config", var), "from-config");
+        std::env::remove_var(var);
+    }
+
+    #[test]
+    fn empty_when_neither_set() {
+        let var = "SEARCH_TEST_KEY_NONE";
+        std::env::remove_var(var);
+        assert_eq!(resolve_key("", var), "");
+    }
 }

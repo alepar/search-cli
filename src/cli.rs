@@ -6,23 +6,26 @@ use clap::{Parser, Subcommand};
     name = "search",
     version,
     about = "Agent-friendly multi-provider search CLI",
-    long_about = "Aggregates 11 search providers with 14 search modes.\n\
-        Auto-detects intent from your query and routes to the best providers.\n\
+    long_about = "Aggregates 13 search providers across 13 explicit search modes.\n\
+        You choose the mode (-m) and/or providers (-p); the CLI does not guess\n\
+        intent. Run `search agent-info` for the machine-readable capability map.\n\
         Outputs colored tables for humans, JSON when piped to other tools.\n\n\
         PROVIDERS:\n  \
-          brave      Independent web index (35B pages), news search\n  \
-          serper     Google SERP: web, news, scholar, patents, images, places\n  \
+          parallel   Agent-native search (Parallel AI): LLM-ready excerpts\n  \
+          brave      Independent web index (not Google/Bing) + LLM grounding\n  \
+          serper     Cheapest raw Google SERP: web, news, scholar, patents, places\n  \
           exa        Neural/semantic search, LinkedIn people, find-similar\n  \
           jina       Fast web search + URL-to-markdown reader\n  \
+          linkup     High-accuracy agent search (SimpleQA leader)\n  \
           firecrawl  JS-rendered page scraping + structured extraction\n  \
-          tavily     General, news, academic, deep search\n  \
-          serpapi    80+ engines: Google, Bing, YouTube, Baidu, Scholar\n  \
-          perplexity AI-powered answers with citations (Sonar)\n  \
+          tavily     RAG-oriented search: general, news, academic, deep\n  \
+          serpapi    Many engines (Google, Bing, YouTube, Baidu, Scholar)\n  \
+          perplexity LLM-synthesized answer with citations (Sonar)\n  \
           browserless Cloud browser for Cloudflare/JS-heavy pages\n  \
-          stealth    Anti-bot stealth scraper\n  \
-          xai        X/Twitter social search via xAI Grok\n\n\
+          stealth    Local anti-bot scraper (no API key)\n  \
+          xai        Only real-time X/Twitter search (Grok agentic)\n\n\
         EXAMPLES:\n  \
-          search \"rust error handling\"                    # auto-detect mode\n  \
+          search \"rust error handling\"                    # general web search\n  \
           search search -q \"CRISPR\" -m academic           # academic papers\n  \
           search search -q \"CEO of Stripe\" -m people      # LinkedIn profiles via Exa\n  \
           search search -q \"AI news\" -m news              # breaking news\n  \
@@ -55,6 +58,10 @@ pub struct Cli {
     /// Search X (Twitter) only — shorthand for -m social -p xai
     #[arg(long = "x", global = true)]
     pub x_only: bool,
+
+    /// Verbose debug logging to stderr (sets log level to debug unless RUST_LOG is set)
+    #[arg(long, global = true, visible_alias = "verbose")]
+    pub debug: bool,
 }
 
 #[derive(Subcommand)]
@@ -68,13 +75,27 @@ pub enum Commands {
         action: ConfigAction,
     },
 
+    /// Sign in to metasearch.sh and store an API key for this machine
+    Login(LoginArgs),
+
+    /// Remove the stored metasearch.sh credentials from this machine
+    Logout {
+        /// Also revoke the key server-side so it stops working everywhere
+        #[arg(long)]
+        revoke: bool,
+    },
+
+    /// Show which metasearch.sh account this machine is signed in to
+    Whoami,
+
     /// Show machine-readable capabilities (for agents)
     AgentInfo,
 
     /// List all providers with status and capabilities
     Providers,
 
-    /// Verify if email addresses exist via SMTP (no API key needed)
+    /// Verify if email addresses exist via SMTP (no API key needed). Probes
+    /// mail servers directly (RCPT TO) — bulk probing can hurt IP reputation
     Verify(VerifyArgs),
 
     /// Manage skill file installation for agent platforms
@@ -89,6 +110,50 @@ pub enum Commands {
         #[arg(long)]
         check: bool,
     },
+
+    /// Show remaining credits/quota for providers that expose a usage API
+    Usage,
+
+    /// Test-fire every configured provider with a minimal query and report
+    /// health, latency, and failure causes (each check is one billed request)
+    Doctor,
+
+    /// Usage statistics from the local search logs (spend, modes, providers)
+    Stats(StatsArgs),
+
+    /// Manage the local query cache
+    Cache {
+        #[command(subcommand)]
+        action: CacheAction,
+    },
+}
+
+#[derive(Parser)]
+pub struct LoginArgs {
+    /// Print the URL instead of launching a browser (headless boxes, SSH)
+    #[arg(long)]
+    pub no_browser: bool,
+
+    /// API host to sign in to (default: https://metasearch.sh)
+    #[arg(long)]
+    pub url: Option<String>,
+}
+
+#[derive(Parser)]
+pub struct StatsArgs {
+    /// Analysis window in days
+    #[arg(long, default_value = "30")]
+    pub days: u64,
+
+    /// Delete log files older than this many days, then exit
+    #[arg(long)]
+    pub prune: Option<u64>,
+}
+
+#[derive(Subcommand)]
+pub enum CacheAction {
+    /// Delete all cached query results
+    Clear,
 }
 
 #[derive(Parser)]
@@ -107,15 +172,17 @@ pub struct SearchArgs {
     #[arg(short, long)]
     pub query: String,
 
-    /// Search mode [auto detects from query]
-    #[arg(short, long, value_enum, default_value = "auto")]
+    /// Search mode (default: general). Choose explicitly: general, news,
+    /// academic, deep, social, scholar, patents, people, places, images,
+    /// similar, scrape, extract. See `search agent-info` for the full map.
+    #[arg(short, long, value_enum, default_value = "general")]
     pub mode: Mode,
 
     /// Number of results to return
     #[arg(short, long)]
     pub count: Option<usize>,
 
-    /// Use only specific providers (comma-separated: brave,serper,exa,jina,firecrawl,tavily,serpapi,perplexity,browserless,stealth,xai)
+    /// Use only specific providers (comma-separated: parallel,brave,serper,exa,jina,linkup,firecrawl,tavily,serpapi,perplexity,browserless,stealth,xai)
     #[arg(short, long, value_delimiter = ',')]
     pub providers: Option<Vec<String>>,
 
@@ -130,6 +197,30 @@ pub struct SearchArgs {
     /// Freshness filter: day, week, month, year
     #[arg(short, long)]
     pub freshness: Option<String>,
+
+    /// Bypass the local 5-minute query cache and force a fresh search
+    #[arg(long)]
+    pub no_cache: bool,
+
+    /// Cap each result snippet (and answer) at this many characters
+    #[arg(long)]
+    pub max_chars: Option<usize>,
+
+    /// Country code for region-biased results (e.g. gb, de, jp) — applied by
+    /// providers that support it (serper, serpapi, brave, parallel)
+    #[arg(long)]
+    pub country: Option<String>,
+
+    /// Language code for results (e.g. en, de, fr) — applied by providers
+    /// that support it (serper, serpapi, brave)
+    #[arg(long)]
+    pub lang: Option<String>,
+
+    /// Allow extract/scrape of private, loopback, and link-local addresses
+    /// (blocked by default to keep prompt-injected agents away from
+    /// localhost and cloud metadata endpoints)
+    #[arg(long)]
+    pub allow_private: bool,
 }
 
 #[derive(Subcommand)]
@@ -140,7 +231,8 @@ pub enum ConfigAction {
     Set {
         /// Config key (e.g. keys.brave, settings.timeout)
         key: String,
-        /// Value to set
+        /// Value to set. Pass "-" to read it from stdin, keeping secrets out
+        /// of shell history and process listings
         value: String,
     },
     /// Health-check which providers are configured and ready
@@ -178,9 +270,18 @@ pub mod skill {
     fn targets() -> Vec<Target> {
         let h = home();
         vec![
-            Target { name: "Claude Code", path: h.join(".claude/skills/search") },
-            Target { name: "Codex CLI", path: h.join(".codex/skills/search") },
-            Target { name: "Gemini CLI", path: h.join(".gemini/skills/search") },
+            Target {
+                name: "Claude Code",
+                path: h.join(".claude/skills/search"),
+            },
+            Target {
+                name: "Codex CLI",
+                path: h.join(".codex/skills/search"),
+            },
+            Target {
+                name: "Gemini CLI",
+                path: h.join(".gemini/skills/search"),
+            },
         ]
     }
 

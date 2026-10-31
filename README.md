@@ -1,8 +1,8 @@
 <div align="center">
 
-# Search CLI
+# Search CLI — Web Search for AI Agents
 
-**One binary, 11 providers, 14 modes. The web search tool your AI agent is missing.**
+**One binary, 13 providers, 13 modes, rank-fused results. The web search tool your AI agent is missing.**
 
 <br />
 
@@ -19,7 +19,7 @@
 
 ---
 
-A single Rust binary that aggregates Brave, Serper, Exa, Jina, Firecrawl, Tavily, SerpApi, Perplexity, xAI, and more into one unified search interface. Designed from day one for AI agents -- structured JSON output, semantic exit codes, auto-JSON when piped, and parallel fan-out across providers in under 2 seconds.
+A single Rust binary that aggregates Brave, Serper, Exa, Linkup, Jina, Firecrawl, Tavily, SerpApi, Perplexity, Parallel, xAI, and more into one search interface. Built for AI agents from day one: structured JSON, semantic exit codes, self-describing `agent-info`, reciprocal rank fusion across providers, and a `usage` command that reports remaining API credits.
 
 [Install](#install) | [How It Works](#how-it-works) | [Features](#features) | [Providers](#providers) | [Contributing](#contributing)
 
@@ -29,13 +29,13 @@ A single Rust binary that aggregates Brave, Serper, Exa, Jina, Firecrawl, Tavily
 
 Every search API is good at something different. Brave has its own 35-billion page index. Serper gives you raw Google results plus Scholar, Patents, and Places. Exa does neural/semantic search. Perplexity gives AI-synthesized answers with citations. Jina reads any URL into clean markdown. Firecrawl renders JavaScript-heavy pages. xAI searches X/Twitter.
 
-You shouldn't have to wire up each one separately, handle their different response formats, manage rate limits, or figure out which provider to use for which query type. `search` does all of that for you -- routes your query to the right combination automatically, fans out in parallel, deduplicates results, and gives you a single clean response.
+You shouldn't have to wire up each one separately, handle their different response formats, or manage rate limits. `search` does the plumbing: you pick the mode (the CLI never guesses intent), it fans out to that mode's providers in parallel and fuses the results with reciprocal rank fusion. A URL that three engines independently return outranks any single engine's top hit — the fastest provider no longer wins by default, the most-agreed-on result does.
 
 ```bash
 search "CRISPR gene therapy breakthroughs"
 ```
 
-That's it. Auto-detects your intent, picks the right providers, and returns results in under 2 seconds.
+That's it — a plain `search "query"` runs a general multi-provider web search and merges the results in under 2 seconds. You stay in control of routing: pick a mode with `-m` or specific providers with `-p` (run `search agent-info` for the full map). The CLI never guesses intent from your query.
 
 ## Install
 
@@ -46,7 +46,7 @@ cargo install agent-search
 
 **Homebrew:**
 ```bash
-brew tap 199-biotechnologies/tap
+brew tap paperfoot/tap
 brew install search-cli
 ```
 
@@ -82,12 +82,8 @@ search "your query here"
 
 ```
                           ┌─────────────┐
-                          │  Your Query │
-                          └──────┬──────┘
-                                 │
-                          ┌──────▼──────┐
-                          │   Classify  │  regex-based intent detection
-                          └──────┬──────┘
+                          │ Query + -m  │  you pick the mode —
+                          └──────┬──────┘  no intent guessing
                                  │
                     ┌────────────┼────────────┐
                     ▼            ▼            ▼
@@ -98,8 +94,8 @@ search "your query here"
                    └────────────┼────────────┘
                                 │
                          ┌──────▼──────┐
-                         │   Dedup &   │  URL normalization
-                         │   Merge     │  across providers
+                         │ Rank fusion │  dedup + reciprocal rank
+                         │  (RRF k=60) │  fusion across providers
                          └──────┬──────┘
                                 │
                     ┌───────────┴───────────┐
@@ -111,33 +107,41 @@ search "your query here"
 ```
 
 1. **Parse** -- Clap parses your query, mode, provider filter, and output preferences
-2. **Classify** -- If mode is `auto`, regex-based intent classifier picks the right mode
-3. **Route** -- Mode determines which providers to query (or you override with `-p`)
-4. **Fan out** -- `tokio::JoinSet` fires all providers in parallel with per-provider timeouts
-5. **Collect** -- Results stream in as providers respond (no waiting for the slowest)
-6. **Dedup** -- URL normalization removes duplicates across providers
+2. **Route** -- Your mode determines which providers to query (or you override with `-p`)
+3. **Fan out** -- `tokio::JoinSet` fires all providers in parallel with per-provider timeouts
+4. **Collect** -- Once enough unique results arrive, stragglers get a 1.5s grace window, then are cancelled (reported in `metadata.providers_cancelled`; `deep` mode always waits for everyone)
+5. **Fuse** -- Reciprocal rank fusion: URLs returned by multiple providers rank first (`extra.also_found_by` records consensus); ordering is deterministic, not fastest-provider-first
+6. **Separate answers** -- AI-synthesized answers (Perplexity/Tavily) land in `answers[]`, so every `results[].url` is a fetchable web URL
 7. **Render** -- JSON envelope when piped, colored terminal table when interactive
 
 ## Features
 
-### 14 Search Modes
+### 13 Search Modes
 
-| Mode | What it does | Providers used |
-|------|-------------|----------------|
-| `auto` | Detects intent from your query | *varies* |
-| `general` | Broad web search | Brave + Serper + Exa + Jina + Tavily + Perplexity |
-| `news` | Breaking news, current events | Brave News + Serper News + Tavily + Perplexity |
-| `academic` | Research papers, studies | Exa + Serper + Tavily + Perplexity |
-| `people` | LinkedIn profiles, bios | Exa |
-| `deep` | Maximum coverage | Brave (LLM Context) + Exa + Serper + Tavily + Perplexity + xAI |
-| `scholar` | Google Scholar | Serper + SerpApi |
-| `patents` | Patent search | Serper |
-| `images` | Image search | Serper |
-| `places` | Local businesses, maps | Serper |
-| `extract` | Full text from a URL | Stealth -> Jina -> Firecrawl -> Browserless |
-| `scrape` | Page scraping | Stealth -> Jina -> Firecrawl -> Browserless |
-| `similar` | Find similar pages to a URL | Exa |
-| `social` | X/Twitter social search | xAI (Grok) |
+Pick a mode explicitly with `-m` (default is `general`). The `-q` column
+matters: `extract`/`scrape`/`similar` take a URL and reject text queries
+(exit 3). This table mirrors `search agent-info`, which is generated from the
+same routing registry the engine uses.
+
+| Mode | Use when | `-q` is | Providers used |
+|------|----------|---------|----------------|
+| `general` | Any web lookup not covered below (default) | query | Parallel + Brave + Serper + Exa + Jina + Linkup + Tavily + Perplexity |
+| `news` | Current events; add `-f day`/`-f week` | query | Parallel + Brave + Serper + Linkup + Tavily + Perplexity (news endpoints) |
+| `academic` | Papers/studies by topic (semantic + web) | query | Exa + Serper + Tavily + Perplexity |
+| `scholar` | Google Scholar records: citations, PDFs | query | Serper + SerpApi |
+| `deep` | Max coverage; waits for all providers — use `-c 30` | query | Parallel + Brave (web + LLM Context) + Serper + Exa + Linkup + Tavily + Perplexity + xAI |
+| `people` | A person, their role, LinkedIn profile | query | Exa |
+| `social` | What's being said on X/Twitter | query | xAI (Grok) |
+| `patents` | Prior art, patent families | query | Serper |
+| `images` | Image search (check `image_url` fields) | query | Serper |
+| `places` | Local businesses, maps | query | Serper |
+| `extract` | Read one page as markdown, incl. JS/anti-bot | **URL** | Stealth -> Jina -> Firecrawl -> Browserless |
+| `scrape` | Alias of `extract` (identical) | **URL** | Stealth -> Jina -> Firecrawl -> Browserless |
+| `similar` | "More like this page" | **URL** | Exa |
+
+### Rank Fusion, Not Fastest-Provider-First
+
+Most meta-search tools return results in whatever order providers answer, so result #1 is the fastest API's opinion. `search` scores every URL across all providers (RRF, k=60): consensus ranks first, ordering is deterministic, and each result carries `extra.also_found_by` so you can see which engines agreed. The envelope tells you exactly what happened — who contributed (`provider_results`), who was cancelled (`providers_cancelled`), which filters a provider ignored (`warnings`), and whether you got a cached replay (`cached`).
 
 ### Agent-First Design
 
@@ -153,13 +157,20 @@ search "query" --json
 #   "status": "success",
 #   "query": "...",
 #   "mode": "general",
-#   "results": [...],
+#   "results": [...],                              // rank-fused, deduped
+#   "answers": [{"provider": "perplexity_sonar", "text": "..."}],
 #   "metadata": {
 #     "elapsed_ms": 1542,
 #     "result_count": 10,
-#     "providers_queried": ["brave", "serper", "exa"]
+#     "providers_queried": ["brave", "serper", "exa", "jina"],
+#     "provider_results": {"brave": 10, "serper": 10},  // who contributed
+#     "providers_cancelled": ["jina"],             // cut off after enough results
+#     "warnings": []                               // e.g. filters a provider ignored
 #   }
 # }
+
+# Check remaining credits (where the provider API exposes them)
+search usage --json
 ```
 
 **Auto-JSON:** Output is automatically JSON when piped to another program. Human-readable tables when you're in a terminal.
@@ -169,18 +180,18 @@ search "query" --json
 | Code | Meaning | Agent action |
 |------|---------|-------------|
 | 0 | Success | Process results |
-| 1 | Runtime error | Retry might help |
-| 2 | Config error | Fix configuration |
-| 3 | Auth missing | Set API key |
+| 1 | Transient error (API, network) | Retry might help |
+| 2 | Config or auth error | Fix setup / set API key |
+| 3 | Bad input | Fix arguments |
 | 4 | Rate limited | Back off and retry |
 
 ### Usage Examples
 
 ```bash
-# Auto-detect mode (just type what you want)
+# Default general web search (no mode = general; no intent guessing)
 search "quantum computing advances"
-search "who is the CEO of Anthropic"
-search "CRISPR research papers"
+search search -q "who is the CEO of Anthropic" -m people
+search search -q "CRISPR research papers" -m academic
 
 # Force a specific mode
 search search -q "transformer architectures" -m academic
@@ -190,6 +201,10 @@ search search -q "BRCA1 gene patent" -m patents
 
 # Search X (Twitter) only
 search --x "AI agents"
+
+# URL modes take a URL, not a query
+search search -q https://example.com/article -m extract
+search search -q https://stripe.com -m similar
 
 # Pick specific providers
 search search -q "machine learning" -p exa
@@ -205,42 +220,122 @@ search "query" 2>/dev/null             # suppress diagnostics
 
 | Provider | What it does | Best for |
 |----------|-------------|----------|
-| **[Brave](https://brave.com/search/api/)** | Independent 35B-page index + LLM Context API | Web search, news, RAG-ready content |
-| **[Serper](https://serper.dev/)** | Raw Google SERP + specialist endpoints | Scholar, patents, images, places |
+| **[Parallel](https://parallel.ai/)** | Agent-native search: objective in, LLM-ready ranked excerpts out | Grounding content for agents, deterministic per-query cost |
+| **[Brave](https://brave.com/search/api/)** | Independent index (not resold Google/Bing) + LLM Context API | Independent ranking signal, news, RAG grounding |
+| **[Serper](https://serper.dev/)** | Cheapest raw Google SERP + specialist endpoints | Actual Google rankings; scholar, patents, images, places |
 | **[Exa](https://exa.ai/)** | Neural/semantic search, category filters | Research papers, people search, similar sites |
 | **[Jina](https://jina.ai/)** | Fast URL-to-markdown, 500 RPM free tier | Reading article content, quick extraction |
+| **[Linkup](https://www.linkup.so/)** | High-accuracy agent search (leads the SimpleQA benchmark) | Factual lookups where accuracy matters most |
 | **[Firecrawl](https://firecrawl.dev/)** | JavaScript rendering, structured extraction | Dynamic pages, SPAs, data extraction |
 | **[Tavily](https://tavily.com/)** | General + deep search, research-focused | Broad coverage, research queries |
-| **[SerpApi](https://serpapi.com/)** | 80+ engines: Google, Bing, YouTube, Baidu | Scholar, multi-engine coverage |
-| **[Perplexity](https://perplexity.ai/)** | AI-powered answers with citations (Sonar Pro) | Complex queries, synthesized answers |
-| **Browserless** | Cloud browser for Cloudflare/JS-heavy pages | Anti-bot bypass, dynamic rendering |
+| **[SerpApi](https://serpapi.com/)** | Many engines: Google, Bing, YouTube, Baidu | Multi-engine coverage; only provider with a real balance API |
+| **[Perplexity](https://perplexity.ai/)** | LLM-synthesized answer with citations (Sonar) | When you want an answer with sources, not raw pages |
+| **Browserless** | Cloud browser for Cloudflare/JS-heavy pages | Anti-bot bypass, pages that need a real browser |
 | **Stealth** | Built-in anti-bot scraper | Protected pages, no API key needed |
-| **[xAI](https://x.ai/)** | X/Twitter search via Grok AI | Tweets, trending topics, social sentiment |
+| **[xAI](https://x.ai/)** | Only provider with native real-time X/Twitter search (Grok) | Live social signal, trending topics, account activity |
+
+### Checking Credits
+
+```bash
+search usage --json
+```
+
+Reports remaining credits/quota for every provider whose API exposes it:
+**SerpApi** (`account.json`), **Firecrawl** (credit-usage endpoint),
+**Tavily** (usage endpoint), **Linkup** (credits balance endpoint), **xAI**
+(management API — set `XAI_MANAGEMENT_API_KEY` + `XAI_TEAM_ID`), and **Brave**
+(rate-limit headers; the check consumes one metered request). The rest are dashboard-only and
+reported as `supported: false`. Purely informational: the
+CLI never disables or deprioritizes a provider because its balance is low —
+if a provider is out of credits, the failed call shows up as a
+`billing_quota` entry in `metadata.provider_failures` and you decide what to
+top up.
+
+### Health Check
+
+```bash
+search doctor --json
+```
+
+Test-fires every configured provider with a minimal query and reports
+`ok`/`fail`, latency, and failure category — the preflight to run before a
+fleet trusts the tool. `config check` tells you a key exists; `doctor` tells
+you it works. Each check is one billed (minimal) request. Exit 0 if all
+healthy, 1 otherwise.
+
+### Usage Analytics
+
+```bash
+search stats --json          # last 30 days
+search stats --days 7        # custom window
+search stats --prune 90      # delete logs older than 90 days
+```
+
+Computed entirely from the local search logs — nothing leaves the machine.
+Reports search volume by mode, per-provider call counts / failures /
+cancellations, estimated spend (from a static price table), **measured**
+balance burn (deltas between `search usage` snapshots), cache-hit rate,
+repeated queries, and a read-through table — which providers' results agents
+actually extract afterwards, the closest local proxy for result usefulness.
+Set `SEARCH_LOG=off` to disable logging entirely.
 
 ## Configuration
 
 Config file lives at `~/.config/search/config.toml` (Linux) or `~/Library/Application Support/search/config.toml` (macOS).
 
 ```bash
-search config show       # View current config (keys masked)
-search config check      # Health check all providers
-search config set K V    # Set a value
+search config show          # View current config (keys masked)
+search config check         # Which providers have a key set
+search config set K V       # Set a value
+echo "$KEY" | search config set keys.brave -   # read secret from stdin
 ```
 
-Environment variables override the config file. Prefix with `SEARCH_KEYS_`:
+The config file holds API keys, so it's created `0600` (owner-only) and any
+older world-readable file is tightened on load. Set secrets with `-` as the
+value to read from stdin and keep keys out of shell history and `ps`.
+
+Environment variables override the config file, so a freshly-exported or
+CI-injected key always wins over stale local config. Two accepted forms:
 
 ```bash
+# Standard per-provider variables (recommended):
+export BRAVE_API_KEY=your-key
+export SERPER_API_KEY=your-key
+export EXA_API_KEY=your-key
+# ...also PERPLEXITY_API_KEY, JINA_API_KEY, LINKUP_API_KEY, FIRECRAWL_API_KEY,
+#        TAVILY_API_KEY, SERPAPI_API_KEY, BROWSERLESS_API_KEY, XAI_API_KEY,
+#        PARALLEL_API_KEY
+
+# Or the SEARCH_KEYS_ prefixed form:
 export SEARCH_KEYS_BRAVE=your-key
-export SEARCH_KEYS_SERPER=your-key
-export SEARCH_KEYS_EXA=your-key
-export SEARCH_KEYS_JINA=your-key
-export SEARCH_KEYS_FIRECRAWL=your-key
-export SEARCH_KEYS_TAVILY=your-key
-export SEARCH_KEYS_SERPAPI=your-key
-export SEARCH_KEYS_PERPLEXITY=your-key
-export SEARCH_KEYS_BROWSERLESS=your-key
-export SEARCH_KEYS_XAI=your-key
 ```
+
+Precedence (highest first): `<PROVIDER>_API_KEY` env → `SEARCH_KEYS_*` env → config file.
+
+## Signing in to metasearch.sh
+
+[metasearch.sh](https://metasearch.sh) is the hosted sibling: one prepaid
+balance, one key, per-call metering. `search login` does the OAuth device flow
+— it prints a short code, opens your browser, and stores the key it gets back.
+
+**What this does today:** it stores the credential. Searches still run through
+your own provider keys. Routing queries through metasearch.sh — so one machine
+needs one key instead of thirteen — is the next release.
+
+```bash
+search login              # code + browser approval, key saved to config
+search login --no-browser # headless: prints the URL to open elsewhere
+search whoami             # which account, what balance, which key
+search logout --revoke    # clear locally and kill the key server-side
+```
+
+Repeat logins from the same machine reuse that machine's key rather than
+minting a new one, and every key shows up in the metasearch.sh dashboard
+labelled with the hostname it was issued to.
+
+Precedence (highest first): `METASEARCH_TOKEN` env → `SEARCH_METASEARCH_TOKEN`
+env → config file. `METASEARCH_URL` overrides the API host for self-hosted or
+local instances.
 
 ## Updating
 
@@ -258,6 +353,18 @@ cargo build --release
 # Binary at target/release/search
 ```
 
+**Linux / containers:** the `stealth` scraper depends on BoringSSL, which
+doesn't link on Linux. Build without it — the extract chain simply starts at
+Jina instead of the local scraper:
+
+```bash
+cargo install agent-search --no-default-features
+```
+
+Prebuilt binaries ship for macOS (both architectures) and Linux x86_64; every
+release includes a `SHA256SUMS` file, and both `install.sh` and self-update
+verify the checksum before installing.
+
 ## Contributing
 
 Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
@@ -270,7 +377,7 @@ Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines
 
 <div align="center">
 
-Built by [Boris Djordjevic](https://github.com/longevityboris) at [199 Biotechnologies](https://github.com/199-biotechnologies) | [Paperfoot AI](https://paperfoot.ai)
+Built by [Boris Djordjevic](https://github.com/longevityboris) at [Paperfoot AI](https://paperfoot.com)
 
 <br />
 

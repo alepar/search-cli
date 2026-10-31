@@ -49,9 +49,16 @@ impl Perplexity {
             body["search_mode"] = json!(sm);
         }
 
-        // Apply domain filter from opts
-        if !opts.include_domains.is_empty() {
-            body["search_domain_filter"] = json!(opts.include_domains);
+        // Apply domain filters from opts. Perplexity's search_domain_filter
+        // takes one array; exclusions are entries prefixed with '-'.
+        if !opts.include_domains.is_empty() || !opts.exclude_domains.is_empty() {
+            let domains: Vec<String> = opts
+                .include_domains
+                .iter()
+                .cloned()
+                .chain(opts.exclude_domains.iter().map(|d| format!("-{d}")))
+                .collect();
+            body["search_domain_filter"] = json!(domains);
         }
 
         // Apply recency filter: explicit param first, then opts.freshness
@@ -82,13 +89,7 @@ impl Perplexity {
                         provider: "perplexity",
                     });
                 }
-                if !r.status().is_success() {
-                    return Err(SearchError::Api {
-                        provider: "perplexity",
-                        code: "api_error",
-                        message: format!("HTTP {}", r.status()),
-                    });
-                }
+                let r = super::ok_or_api_error(r, "perplexity").await?;
                 Ok(r.json::<PerplexityResponse>().await?)
             }
         })
@@ -181,7 +182,9 @@ impl super::Provider for Perplexity {
     fn name(&self) -> &'static str {
         "perplexity"
     }
-    fn env_keys(&self) -> &[&'static str] { &["PERPLEXITY_API_KEY", "SEARCH_KEYS_PERPLEXITY"] }
+    fn env_keys(&self) -> &[&'static str] {
+        &["PERPLEXITY_API_KEY", "SEARCH_KEYS_PERPLEXITY"]
+    }
     fn capabilities(&self) -> &[&'static str] {
         &["general", "news", "academic", "deep"]
     }
@@ -214,4 +217,3 @@ impl super::Provider for Perplexity {
             .await
     }
 }
-

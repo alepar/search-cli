@@ -54,7 +54,7 @@ impl super::Provider for Parallel {
         &self,
         query: &str,
         count: usize,
-        _opts: &SearchOpts,
+        opts: &SearchOpts,
     ) -> Result<Vec<SearchResult>, SearchError> {
         if !self.is_configured() {
             return Err(SearchError::AuthMissing {
@@ -65,14 +65,34 @@ impl super::Provider for Parallel {
         let client = &self.ctx.client;
         let api_key = self.api_key();
 
+        // Parallel supports filters natively via advanced_settings.source_policy
+        // (include_domains / exclude_domains / after_date).
+        let mut source_policy = serde_json::Map::new();
+        if !opts.include_domains.is_empty() {
+            source_policy.insert("include_domains".to_string(), json!(opts.include_domains));
+        }
+        if !opts.exclude_domains.is_empty() {
+            source_policy.insert("exclude_domains".to_string(), json!(opts.exclude_domains));
+        }
+        if let Some(days) = opts.freshness.as_deref().and_then(super::freshness_days) {
+            source_policy.insert("after_date".to_string(), json!(super::date_days_ago(days)));
+        }
+        let location = opts.country.as_ref().map(|c| c.to_uppercase());
+
         super::retry_request(|| async {
-            let body = json!({
+            let mut body = json!({
                 "objective": query,
                 "search_queries": [query],
                 "mode": "fast",
                 "num_results": count,
                 "excerpts": { "max_chars_per_result": 3000 },
             });
+            if !source_policy.is_empty() {
+                body["advanced_settings"] = json!({ "source_policy": source_policy.clone() });
+            }
+            if let Some(loc) = &location {
+                body["location"] = json!(loc);
+            }
 
             let resp = client
                 .post("https://api.parallel.ai/v1beta/search")
@@ -82,19 +102,7 @@ impl super::Provider for Parallel {
                 .send()
                 .await?;
 
-            let status = resp.status();
-            if status == 429 {
-                return Err(SearchError::RateLimited {
-                    provider: "parallel",
-                });
-            }
-            if !status.is_success() {
-                return Err(SearchError::Api {
-                    provider: "parallel",
-                    code: "api_error",
-                    message: format!("Parallel API error ({})", status),
-                });
-            }
+            let resp = super::ok_or_api_error(resp, "parallel").await?;
 
             let data: ParallelResponse = resp.json().await?;
             let results = data

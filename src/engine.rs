@@ -1,31 +1,27 @@
-use crate::classify::classify_intent;
 use crate::context::AppContext;
 use crate::errors::SearchError;
 use crate::providers::{self, Provider};
-use crate::types::{Mode, ResponseMetadata, SearchOpts, SearchResponse};
-use std::collections::HashSet;
+use crate::registry;
+use crate::types::{
+    Answer, FailureCategory, Mode, ProviderFailure, ResponseMetadata, ResponseStatus, SearchOpts,
+    SearchResponse, SearchResult, ENVELOPE_VERSION,
+};
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 
-/// Which providers to query for each mode
-fn providers_for_mode(mode: Mode) -> &'static [&'static str] {
-    match mode {
-        Mode::Auto | Mode::General => &["parallel", "brave", "serper", "exa", "jina", "tavily", "perplexity"],
-        Mode::News => &["parallel", "brave", "serper", "tavily", "perplexity"],
-        Mode::Academic => &["exa", "serper", "tavily", "perplexity"],
-        Mode::Deep => &["parallel", "brave", "exa", "serper", "tavily", "perplexity", "xai"],
-        Mode::Scholar => &["serper", "serpapi"],
-        Mode::Patents => &["serper"],
-        Mode::People => &["exa"],
-        Mode::Images => &["serper"],
-        Mode::Places => &["serper"],
-        Mode::Extract | Mode::Scrape => &["stealth", "jina", "firecrawl", "browserless"],
-        Mode::Similar => &["exa"],
-        Mode::Social => &["xai"],
-    }
-}
+/// Once enough unique results have arrived, in-flight providers get this long
+/// to land before being cancelled. Long enough for the second/third-fastest
+/// providers to contribute (so fusion has consensus to rank on), short enough
+/// that one slow provider doesn't hold the response hostage.
+const EARLY_STOP_GRACE: Duration = Duration::from_millis(1500);
+
+/// Reciprocal-rank-fusion constant (standard k=60): dampens the gap between
+/// rank 1 and rank 2 so cross-provider consensus outweighs any single
+/// provider's top pick.
+const RRF_K: f64 = 60.0;
 
 pub async fn execute_search(
     ctx: Arc<AppContext>,
@@ -38,91 +34,41 @@ pub async fn execute_search(
     let start = Instant::now();
     let query_arc: Arc<str> = Arc::from(query);
 
-    // Speculative Execution: If in Auto mode, we don't wait for classification 
-    // to start the most likely providers (Brave, Serper).
-    let mut speculative_set = JoinSet::new();
-    let is_auto = mode == Mode::Auto;
-    
-    if is_auto && only_providers.is_none() {
-        // Only speculate if we have keys and it's not a filtered provider list
-        if !ctx.config.keys.brave.is_empty() {
-            let q = query_arc.clone();
-            let c = count;
-            let o = opts.clone();
-            let p = providers::brave::Brave::new(ctx.clone());
-            speculative_set.spawn(async move { ("brave", p.search(&q, c, &o).await) });
-        }
-        if !ctx.config.keys.serper.is_empty() {
-            let q = query_arc.clone();
-            let c = count;
-            let o = opts.clone();
-            let p = providers::serper::Serper::new(ctx.clone());
-            speculative_set.spawn(async move { ("serper", p.search(&q, c, &o).await) });
-        }
-    }
-
-    let resolved_mode = if is_auto {
-        classify_intent(query)
-    } else {
-        mode
-    };
-
-    // If auto resolved to a mode where Brave/Serper aren't wanted,
-    // abort speculative tasks to avoid mixing generic web results into
-    // intent-specific searches (e.g. news, social, academic).
-    let spec_compatible = matches!(
-        resolved_mode,
-        Mode::Auto | Mode::General | Mode::Deep
-    );
-    if !spec_compatible {
-        speculative_set.abort_all();
-        // Drain aborted tasks so they don't merge later
-        while speculative_set.join_next().await.is_some() {}
-    }
-
-    let all_providers = providers::build_providers(&ctx);
-    let wanted = providers_for_mode(resolved_mode);
-
-    let active: Vec<Box<dyn Provider>> = all_providers
+    // Concrete mode in, concrete provider set out — no intent guessing, no
+    // speculative pre-launch. The set is the mode's providers (or whatever -p
+    // requested), intersected with what's actually configured.
+    let wanted = registry::spec(mode).providers;
+    let active: Vec<Box<dyn Provider>> = providers::build_providers(&ctx)
         .into_iter()
         .filter(|p| {
             let name = p.name();
-            // Don't restart speculative ones (they already launched above)
-            if is_auto && only_providers.is_none() && (name == "brave" || name == "serper") { return false; }
-            
             let in_mode_set = wanted.contains(&name);
-            let in_filter = only_providers
-                .as_ref()
-                .map(|list| list.iter().any(|f| f.eq_ignore_ascii_case(name)))
-                .unwrap_or(true);
-            (in_mode_set || only_providers.is_some()) && in_filter && p.is_configured()
+            (in_mode_set || only_providers.is_some())
+                && provider_allowed(name, only_providers)
+                && p.is_configured()
         })
         .collect();
 
-    if active.is_empty() && speculative_set.is_empty() {
-        return Err(SearchError::NoProviders(resolved_mode.to_string()));
+    if active.is_empty() {
+        return Err(no_providers_error(mode, only_providers));
     }
 
     let mut set = JoinSet::new();
     let mut providers_queried = Vec::new();
 
-    // Re-add speculative ones to the tracking list (only if they weren't aborted)
-    if is_auto && only_providers.is_none() && spec_compatible {
-        if !ctx.config.keys.brave.is_empty() { providers_queried.push("brave".to_string()); }
-        if !ctx.config.keys.serper.is_empty() { providers_queried.push("serper".to_string()); }
-    }
-
-    // For Deep mode, also launch Brave LLM Context API in parallel
-    if resolved_mode == Mode::Deep && !ctx.config.keys.brave.is_empty() {
-        let q = query_arc.clone();
-        let c = count;
-        let o = opts.clone();
+    // Deep mode also pulls Brave's LLM Context (grounding) API alongside Brave
+    // web search — querying brave twice (web + grounding) is intentional.
+    if mode == Mode::Deep {
         let brave = providers::brave::Brave::new(ctx.clone());
-        set.spawn(async move {
-            let result = timeout(Duration::from_secs(15), brave.search_llm_context(&q, c, &o)).await;
-            ("brave_llm_context", result)
-        });
-        providers_queried.push("brave_llm_context".to_string());
+        if brave.is_configured() {
+            let (q, c, o) = (query_arc.clone(), count, opts.clone());
+            set.spawn(async move {
+                let result =
+                    timeout(Duration::from_secs(15), brave.search_llm_context(&q, c, &o)).await;
+                ("brave_llm_context", result)
+            });
+            providers_queried.push("brave_llm_context".to_string());
+        }
     }
 
     for provider in active {
@@ -133,66 +79,67 @@ pub async fn execute_search(
         let sopts = opts.clone();
         providers_queried.push(name.to_string());
 
-        match resolved_mode {
-            Mode::News => {
-                set.spawn(async move {
-                    let result = timeout(tout, provider.search_news(&q, c, &sopts)).await;
-                    (name, result)
-                });
-            }
-            _ => {
-                set.spawn(async move {
-                    let result = timeout(tout, provider.search(&q, c, &sopts)).await;
-                    (name, result)
-                });
-            }
+        if mode == Mode::News {
+            set.spawn(async move {
+                let result = timeout(tout, provider.search_news(&q, c, &sopts)).await;
+                (name, result)
+            });
+        } else {
+            set.spawn(async move {
+                let result = timeout(tout, provider.search(&q, c, &sopts)).await;
+                (name, result)
+            });
         }
     }
 
-    let mut all_results = Vec::new();
+    // Per-provider result buckets, fused after collection. Early-stop: once
+    // enough unique results exist, in-flight providers get EARLY_STOP_GRACE
+    // to land, then are cancelled. Deep mode never cancels — coverage is its
+    // entire purpose.
+    let mut buckets: Vec<(String, Vec<SearchResult>)> = Vec::new();
     let mut providers_failed = Vec::new();
+    let mut provider_failures: Vec<ProviderFailure> = Vec::new();
     let mut unique_urls = HashSet::new();
+    let mut deadline: Option<tokio::time::Instant> = None;
 
-    // Process speculative results first (they had a head start)
-    while let Some(res) = speculative_set.join_next().await {
-        if let Ok((_name, Ok(items))) = res {
-            for item in items {
-                if unique_urls.insert(normalize_url(&item.url)) {
-                    all_results.push(item);
-                }
-            }
-        } else if let Ok((name, Err(e))) = res {
-            tracing::warn!("{name} speculative failed: {e}");
-            providers_failed.push(name.to_string());
-        }
-    }
-
-    // Process the rest
-    while let Some(join_result) = set.join_next().await {
-        match join_result {
-            Ok((_name, Ok(Ok(items)))) => {
-                for item in items {
-                    let normalized = normalize_url(&item.url);
-                    if unique_urls.insert(normalized) {
-                        all_results.push(item);
-                    }
-                }
-                // If we already have enough results, cancel slow providers
-                if all_results.len() >= count {
+    loop {
+        let join_result = match deadline {
+            Some(d) => match tokio::time::timeout_at(d, set.join_next()).await {
+                Ok(r) => r,
+                Err(_) => {
+                    // Grace expired: cancel stragglers, then drain without a
+                    // deadline so already-finished tasks aren't lost.
                     set.abort_all();
-                    break;
+                    deadline = None;
+                    continue;
+                }
+            },
+            None => set.join_next().await,
+        };
+        let Some(join_result) = join_result else {
+            break;
+        };
+        match join_result {
+            Ok((name, Ok(Ok(items)))) => {
+                for item in &items {
+                    unique_urls.insert(normalize_url(&item.url));
+                }
+                buckets.push((name.to_string(), items));
+                if mode != Mode::Deep && deadline.is_none() && unique_urls.len() >= count {
+                    deadline = Some(tokio::time::Instant::now() + EARLY_STOP_GRACE);
                 }
             }
             Ok((name, Ok(Err(e)))) => {
                 tracing::warn!("{name}: {e}");
+                provider_failures.push(e.to_provider_failure(name));
                 providers_failed.push(name.to_string());
             }
             Ok((name, Err(_))) => {
                 tracing::warn!("{name}: timed out");
+                provider_failures.push(timeout_failure(name));
                 providers_failed.push(name.to_string());
             }
             Err(e) => {
-                // JoinError from abort — not a real failure
                 if !e.is_cancelled() {
                     tracing::error!("join error: {e}");
                 }
@@ -200,42 +147,232 @@ pub async fn execute_search(
         }
     }
 
-    // Trim to exact requested count
-    all_results.truncate(count);
+    // Synthetic AI answers (non-http pseudo-URLs like perplexity://answer)
+    // move to the answers field: they aren't fetchable web results and must
+    // not consume result slots or pollute `.results[].url` pipelines.
+    let mut answers: Vec<Answer> = Vec::new();
+    for (_, items) in &mut buckets {
+        items.retain(|r| {
+            if is_synthetic_answer(r) {
+                answers.push(Answer {
+                    provider: r.source.clone(),
+                    text: r.snippet.clone(),
+                });
+                false
+            } else {
+                true
+            }
+        });
+    }
 
+    let provider_results: BTreeMap<String, usize> = buckets
+        .iter()
+        .filter(|(_, items)| !items.is_empty())
+        .map(|(name, items)| (name.clone(), items.len()))
+        .collect();
+
+    // Cancelled = started but neither returned nor failed.
+    let providers_cancelled: Vec<String> = providers_queried
+        .iter()
+        .filter(|q| {
+            !buckets.iter().any(|(n, _)| n == *q) && !providers_failed.iter().any(|f| f == *q)
+        })
+        .cloned()
+        .collect();
+
+    let mut all_results = fuse_rrf(buckets);
+    all_results.truncate(count);
+    let result_count = all_results.len();
+    let warnings = filter_warnings(&providers_queried, opts);
     let elapsed = start.elapsed();
 
-    // Determine accurate status for agents
-    let status = if all_results.is_empty() && !providers_failed.is_empty() {
-        "all_providers_failed"
-    } else if !all_results.is_empty() && !providers_failed.is_empty() {
-        "partial_success"
-    } else if all_results.is_empty() {
-        "no_results"
-    } else {
-        "success"
-    };
+    // Total failure is an error, not a success-shaped envelope.
+    if all_results.is_empty() && answers.is_empty() && !provider_failures.is_empty() {
+        return Err(SearchError::AllProvidersFailed {
+            failed: provider_failures,
+        });
+    }
+
+    let status = ResponseStatus::classify(
+        all_results.is_empty() && answers.is_empty(),
+        !providers_failed.is_empty(),
+    );
 
     Ok(SearchResponse {
-        version: "1".into(),
-        status: status.into(),
+        version: ENVELOPE_VERSION.to_string(),
+        status: status.as_str().to_string(),
         query: query.to_string(),
-        mode: resolved_mode.to_string(),
+        mode: mode.to_string(),
         results: all_results,
+        answers,
         metadata: ResponseMetadata {
             elapsed_ms: elapsed.as_millis(),
-            result_count: 0, // will be set below
+            result_count,
             providers_queried,
             providers_failed,
+            providers_cancelled,
+            provider_results,
+            warnings,
+            cached: false,
+            cache_age_secs: None,
+            provider_failures,
         },
     })
 }
 
+/// True for provider-synthesized answers smuggled in as results under a
+/// known pseudo-URL scheme (perplexity://answer, tavily://answer). Matched
+/// exactly — a result with a merely malformed or scheme-less URL is still a
+/// result, not an answer, and must not silently vanish from results[].
+fn is_synthetic_answer(r: &SearchResult) -> bool {
+    const ANSWER_SCHEMES: &[&str] = &["perplexity://", "tavily://"];
+    ANSWER_SCHEMES.iter().any(|s| r.url.starts_with(s))
+}
+
+/// Reciprocal rank fusion across provider buckets. Each URL scores
+/// Σ 1/(RRF_K + rank) over the providers that returned it, so a result two
+/// engines agree on outranks any single engine's top hit. Deterministic:
+/// independent of provider completion order. Duplicates keep the first-seen
+/// content (by bucket order), enriched with missing fields and an
+/// `also_found_by` list in `extra`.
+fn fuse_rrf(buckets: Vec<(String, Vec<SearchResult>)>) -> Vec<SearchResult> {
+    struct Fused {
+        result: SearchResult,
+        score: f64,
+        insertion: usize,
+    }
+    let mut map: std::collections::HashMap<String, Fused> = std::collections::HashMap::new();
+    let mut insertion = 0usize;
+    for (provider, items) in buckets {
+        for (rank, item) in items.into_iter().enumerate() {
+            let key = normalize_url(&item.url);
+            let add = 1.0 / (RRF_K + rank as f64 + 1.0);
+            match map.get_mut(&key) {
+                Some(f) => {
+                    f.score += add;
+                    if f.result.published.is_none() {
+                        f.result.published = item.published;
+                    }
+                    if f.result.image_url.is_none() {
+                        f.result.image_url = item.image_url;
+                    }
+                    let extra = f.result.extra.get_or_insert_with(|| serde_json::json!({}));
+                    if let Some(obj) = extra.as_object_mut() {
+                        let list = obj
+                            .entry("also_found_by")
+                            .or_insert_with(|| serde_json::json!([]));
+                        if let Some(arr) = list.as_array_mut() {
+                            arr.push(serde_json::json!(provider.clone()));
+                        }
+                    }
+                }
+                None => {
+                    insertion += 1;
+                    map.insert(
+                        key,
+                        Fused {
+                            result: item,
+                            score: add,
+                            insertion,
+                        },
+                    );
+                }
+            }
+        }
+    }
+    let mut fused: Vec<Fused> = map.into_values().collect();
+    fused.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.insertion.cmp(&b.insertion))
+    });
+    fused.into_iter().map(|f| f.result).collect()
+}
+
+/// One warning per active provider that will silently not apply a requested
+/// -f/-d filter, so filtered searches stay auditable. Never excludes a
+/// provider — the caller decides whether unfiltered results are acceptable.
+fn filter_warnings(active: &[String], opts: &SearchOpts) -> Vec<String> {
+    let wants_freshness = opts.freshness.is_some();
+    let wants_domains = !opts.include_domains.is_empty() || !opts.exclude_domains.is_empty();
+    if !wants_freshness && !wants_domains {
+        return Vec::new();
+    }
+    let mut warnings = Vec::new();
+    for name in active {
+        let support = registry::filter_support(name);
+        let mut missing = Vec::new();
+        if wants_freshness && !support.freshness {
+            missing.push("-f freshness");
+        }
+        if wants_domains && !support.domains {
+            missing.push("-d/--exclude-domain");
+        }
+        if !missing.is_empty() {
+            warnings.push(format!(
+                "{name} does not apply {}; its results are unfiltered",
+                missing.join(" or ")
+            ));
+        }
+        if wants_domains {
+            if let Some(note) = support.note {
+                warnings.push(note.to_string());
+            }
+        }
+    }
+    warnings
+}
+
+/// Dedup key for a URL. Strips scheme and a leading `www.` only — anchored, so
+/// it can't corrupt a `www.`/`http://` substring inside a path or query (the
+/// old unanchored `.replace()` collapsed `/files/www.x` and rewrote
+/// `?redirect=http://`, causing false dedup collisions and dropped results).
+/// The query string is preserved so paginated/parameterized URLs stay distinct.
 fn normalize_url(url: &str) -> String {
-    url.trim_end_matches('/')
-        .replace("http://", "https://")
-        .replace("www.", "")
-        .to_lowercase()
+    let lower = url.trim_end_matches('/').to_lowercase();
+    let no_scheme = lower
+        .strip_prefix("https://")
+        .or_else(|| lower.strip_prefix("http://"))
+        .unwrap_or(&lower);
+    let no_www = no_scheme.strip_prefix("www.").unwrap_or(no_scheme);
+    strip_tracking_params(no_www)
+}
+
+/// Drop known tracking parameters from the dedup key. Without this,
+/// `article?utm_source=x` and `article` count as different URLs, defeating
+/// both dedup and the cross-provider consensus that fusion ranks on.
+/// Meaningful params (page=, q=, id=) are preserved.
+fn strip_tracking_params(url: &str) -> String {
+    let Some((base, query)) = url.split_once('?') else {
+        return url.to_string();
+    };
+    let is_tracker = |param: &str| {
+        let name = param.split('=').next().unwrap_or(param);
+        name.starts_with("utm_")
+            || matches!(
+                name,
+                "fbclid"
+                    | "gclid"
+                    | "gclsrc"
+                    | "dclid"
+                    | "msclkid"
+                    | "igshid"
+                    | "mc_cid"
+                    | "mc_eid"
+                    | "ref_src"
+                    | "ref_url"
+                    | "cmpid"
+                    | "_hsenc"
+                    | "_hsmi"
+            )
+    };
+    let kept: Vec<&str> = query.split('&').filter(|p| !is_tracker(p)).collect();
+    if kept.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}?{}", kept.join("&"))
+    }
 }
 
 fn provider_allowed(name: &str, only: &Option<Vec<String>>) -> bool {
@@ -251,189 +388,130 @@ pub async fn execute_special(
     mode: Mode,
     count: usize,
     only_providers: &Option<Vec<String>>,
-    _opts: &SearchOpts,
+    opts: &SearchOpts,
 ) -> Result<SearchResponse, SearchError> {
     let start = Instant::now();
-    let all_providers = providers::build_providers(&ctx);
     let mut results = Vec::new();
     let mut providers_queried = Vec::new();
     let mut providers_failed = Vec::new();
+    let mut provider_failures: Vec<ProviderFailure> = Vec::new();
+    let mut provider_results: BTreeMap<String, usize> = BTreeMap::new();
+
+    // Run one timed provider call, recording success/failure uniformly.
+    macro_rules! query_provider {
+        ($name:literal, $fut:expr, $secs:expr) => {{
+            providers_queried.push($name.to_string());
+            record_result(
+                timeout(Duration::from_secs($secs), $fut).await,
+                $name,
+                &mut results,
+                &mut providers_failed,
+                &mut provider_failures,
+                &mut provider_results,
+            );
+        }};
+    }
 
     match mode {
         Mode::Scholar => {
-            for p in &all_providers {
-                if p.name() == "serper" && p.is_configured() && provider_allowed("serper", only_providers) {
-                    providers_queried.push("serper".to_string());
-                    // Downcast to Serper for scholar-specific method
-                    let serper = providers::serper::Serper::new(ctx.clone());
-                    match timeout(p.timeout(), serper.search_scholar(query, count)).await {
-                        Ok(Ok(items)) => results.extend(items),
-                        Ok(Err(e)) => {
-                            providers_failed.push("serper".to_string());
-                            tracing::warn!("serper scholar: {e}");
-                        }
-                        Err(_) => {
-                            providers_failed.push("serper".to_string());
-                        }
-                    }
-                }
+            let serper = providers::serper::Serper::new(ctx.clone());
+            if serper.is_configured() && provider_allowed("serper", only_providers) {
+                query_provider!("serper", serper.search_scholar(query, count), 10);
             }
-            // Also try SerpApi for scholar
             let serpapi = providers::serpapi::SerpApi::new(ctx.clone());
             if serpapi.is_configured() && provider_allowed("serpapi", only_providers) {
-                providers_queried.push("serpapi".to_string());
-                match timeout(Duration::from_secs(10), serpapi.search_scholar(query, count)).await {
-                    Ok(Ok(items)) => results.extend(items),
-                    Ok(Err(e)) => {
-                        providers_failed.push("serpapi".to_string());
-                        tracing::warn!("serpapi scholar: {e}");
-                    }
-                    Err(_) => {
-                        providers_failed.push("serpapi".to_string());
-                    }
-                }
+                query_provider!("serpapi", serpapi.search_scholar(query, count), 10);
             }
         }
         Mode::Patents => {
             let serper = providers::serper::Serper::new(ctx.clone());
             if serper.is_configured() && provider_allowed("serper", only_providers) {
-                providers_queried.push("serper".to_string());
-                match timeout(Duration::from_secs(10), serper.search_patents(query, count)).await {
-                    Ok(Ok(items)) => results.extend(items),
-                    Ok(Err(e)) => {
-                        providers_failed.push("serper".to_string());
-                        tracing::warn!("serper patents: {e}");
-                    }
-                    Err(_) => providers_failed.push("serper".to_string()),
-                }
+                query_provider!("serper", serper.search_patents(query, count), 10);
             }
         }
         Mode::Images => {
             let serper = providers::serper::Serper::new(ctx.clone());
             if serper.is_configured() && provider_allowed("serper", only_providers) {
-                providers_queried.push("serper".to_string());
-                match timeout(Duration::from_secs(10), serper.search_images(query, count)).await {
-                    Ok(Ok(items)) => results.extend(items),
-                    Ok(Err(e)) => {
-                        providers_failed.push("serper".to_string());
-                        tracing::warn!("serper images: {e}");
-                    }
-                    Err(_) => providers_failed.push("serper".to_string()),
-                }
+                query_provider!("serper", serper.search_images(query, count), 10);
             }
         }
         Mode::Places => {
             let serper = providers::serper::Serper::new(ctx.clone());
             if serper.is_configured() && provider_allowed("serper", only_providers) {
-                providers_queried.push("serper".to_string());
-                match timeout(Duration::from_secs(10), serper.search_places(query, count)).await {
-                    Ok(Ok(items)) => results.extend(items),
-                    Ok(Err(e)) => {
-                        providers_failed.push("serper".to_string());
-                        tracing::warn!("serper places: {e}");
-                    }
-                    Err(_) => providers_failed.push("serper".to_string()),
-                }
+                query_provider!("serper", serper.search_places(query, count), 10);
             }
         }
         Mode::People => {
             let exa = providers::exa::Exa::new(ctx.clone());
             if exa.is_configured() && provider_allowed("exa", only_providers) {
-                providers_queried.push("exa".to_string());
-                match timeout(Duration::from_secs(15), exa.search_people(query, count)).await {
-                    Ok(Ok(items)) => results.extend(items),
-                    Ok(Err(e)) => {
-                        providers_failed.push("exa".to_string());
-                        tracing::warn!("exa people: {e}");
-                    }
-                    Err(_) => providers_failed.push("exa".to_string()),
-                }
+                query_provider!("exa", exa.search_people(query, count), 15);
             }
         }
         Mode::Similar => {
             let exa = providers::exa::Exa::new(ctx.clone());
             if exa.is_configured() && provider_allowed("exa", only_providers) {
-                providers_queried.push("exa".to_string());
-                match timeout(Duration::from_secs(15), exa.find_similar(query, count)).await {
-                    Ok(Ok(items)) => results.extend(items),
-                    Ok(Err(e)) => {
-                        providers_failed.push("exa".to_string());
-                        tracing::warn!("exa similar: {e}");
-                    }
-                    Err(_) => providers_failed.push("exa".to_string()),
-                }
+                query_provider!("exa", exa.find_similar(query, count), 15);
             }
         }
         Mode::Social => {
             let xai = providers::xai::Xai::new(ctx.clone());
             if xai.is_configured() && provider_allowed("xai", only_providers) {
-                providers_queried.push("xai".to_string());
-                match timeout(Duration::from_secs(60), xai.search(query, count, _opts)).await {
-                    Ok(Ok(items)) => results.extend(items),
-                    Ok(Err(e)) => {
-                        providers_failed.push("xai".to_string());
-                        tracing::warn!("xai: {e}");
-                    }
-                    Err(_) => providers_failed.push("xai".to_string()),
-                }
+                query_provider!("xai", xai.search(query, count, opts), 60);
             }
         }
         Mode::Scrape | Mode::Extract => {
-            // Try Stealth (local) first, then Jina reader, then Firecrawl
-            let stealth = providers::stealth::Stealth::new(ctx.clone());
-            if provider_allowed("stealth", only_providers) {
-                providers_queried.push("stealth".to_string());
-                match timeout(Duration::from_secs(30), stealth.scrape_url(query)).await {
-                    Ok(Ok(items)) => results.extend(items),
-                    Ok(Err(e)) => {
-                        providers_failed.push("stealth".to_string());
-                        tracing::warn!("stealth: {e}");
-                    }
-                    Err(_) => providers_failed.push("stealth".to_string()),
+            // Try Stealth (local) first, then Jina reader, Firecrawl, Browserless.
+            // After each attempt, garbage output (binary bytes, anti-bot
+            // challenge pages) is demoted to a failure so the chain keeps
+            // escalating — a scraper "succeeding" with a Cloudflare
+            // interstitial must not stop the fallback.
+            #[cfg(feature = "stealth")]
+            {
+                let stealth = providers::stealth::Stealth::new(ctx.clone());
+                if provider_allowed("stealth", only_providers) {
+                    query_provider!("stealth", stealth.scrape_url(query), 30);
+                    reject_bad_scrape(
+                        "stealth",
+                        &mut results,
+                        &mut providers_failed,
+                        &mut provider_failures,
+                        &mut provider_results,
+                    );
                 }
             }
-
             if results.is_empty() {
                 let jina = providers::jina::Jina::new(ctx.clone());
                 if jina.is_configured() && provider_allowed("jina", only_providers) {
-                    providers_queried.push("jina".to_string());
-                    match timeout(Duration::from_secs(30), jina.read_url(query)).await {
-                        Ok(Ok(items)) => results.extend(items),
-                        Ok(Err(e)) => {
-                            providers_failed.push("jina".to_string());
-                            tracing::warn!("jina reader: {e}");
-                        }
-                        Err(_) => providers_failed.push("jina".to_string()),
-                    }
+                    query_provider!("jina", jina.read_url(query), 30);
+                    reject_bad_scrape(
+                        "jina",
+                        &mut results,
+                        &mut providers_failed,
+                        &mut provider_failures,
+                        &mut provider_results,
+                    );
                 }
             }
             if results.is_empty() {
                 let fc = providers::firecrawl::Firecrawl::new(ctx.clone());
                 if fc.is_configured() && provider_allowed("firecrawl", only_providers) {
-                    providers_queried.push("firecrawl".to_string());
-                    match timeout(Duration::from_secs(30), fc.scrape_url(query)).await {
-                        Ok(Ok(items)) => results.extend(items),
-                        Ok(Err(e)) => {
-                            providers_failed.push("firecrawl".to_string());
-                            tracing::warn!("firecrawl: {e}");
-                        }
-                        Err(_) => providers_failed.push("firecrawl".to_string()),
-                    }
+                    query_provider!("firecrawl", fc.scrape_url(query), 30);
+                    reject_bad_scrape(
+                        "firecrawl",
+                        &mut results,
+                        &mut providers_failed,
+                        &mut provider_failures,
+                        &mut provider_results,
+                    );
                 }
             }
-            // Last resort: Browserless cloud browser (handles Cloudflare, JS rendering)
+            // Last resort: Browserless cloud browser (handles Cloudflare, JS
+            // rendering). Its output is NOT rejected — after the last rung
+            // there is nothing to escalate to, so imperfect content beats none.
             if results.is_empty() {
                 let bl = providers::browserless::Browserless::new(ctx.clone());
                 if bl.is_configured() && provider_allowed("browserless", only_providers) {
-                    providers_queried.push("browserless".to_string());
-                    match timeout(Duration::from_secs(30), bl.scrape_url(query)).await {
-                        Ok(Ok(items)) => results.extend(items),
-                        Ok(Err(e)) => {
-                            providers_failed.push("browserless".to_string());
-                            tracing::warn!("browserless: {e}");
-                        }
-                        Err(_) => providers_failed.push("browserless".to_string()),
-                    }
+                    query_provider!("browserless", bl.scrape_url(query), 30);
                 }
             }
         }
@@ -441,37 +519,196 @@ pub async fn execute_special(
     }
 
     if results.is_empty() && providers_queried.is_empty() {
-        return Err(SearchError::NoProviders(mode.to_string()));
+        return Err(no_providers_error(mode, only_providers));
+    }
+    if results.is_empty() && !provider_failures.is_empty() {
+        return Err(SearchError::AllProvidersFailed {
+            failed: provider_failures,
+        });
+    }
+
+    // Honour -c even when the upstream ignores it. Serper's scholar, places
+    // and patents endpoints return a full page whatever `num` says, so `-c 3`
+    // handed back ten. The fan-out path in execute_search already truncates
+    // after fusing; this path had no equivalent.
+    results.truncate(count);
+
+    // Scraped page content is untrusted input for the consuming agent —
+    // label it so downstream prompts can treat it as data, not instructions.
+    if matches!(mode, Mode::Extract | Mode::Scrape) {
+        for r in &mut results {
+            let extra = r.extra.get_or_insert_with(|| serde_json::json!({}));
+            if let Some(obj) = extra.as_object_mut() {
+                obj.insert(
+                    "content_origin".to_string(),
+                    serde_json::json!("untrusted_web_content"),
+                );
+            }
+        }
+    }
+
+    // Filter honesty: apart from social (xai, which remaps domains to X
+    // handles), no special-mode provider call forwards -f/-d filters.
+    let mut warnings = Vec::new();
+    let wants_filters = opts.freshness.is_some()
+        || !opts.include_domains.is_empty()
+        || !opts.exclude_domains.is_empty();
+    if wants_filters {
+        if mode == Mode::Social {
+            if let Some(note) = registry::filter_support("xai").note {
+                warnings.push(note.to_string());
+            }
+        } else {
+            warnings.push(format!(
+                "mode '{mode}' does not apply -f/-d filters; results are unfiltered"
+            ));
+        }
     }
 
     let elapsed = start.elapsed();
     let result_count = results.len();
-
-    let status = if results.is_empty() && !providers_failed.is_empty() {
-        "all_providers_failed"
-    } else if !results.is_empty() && !providers_failed.is_empty() {
-        "partial_success"
-    } else if results.is_empty() {
-        "no_results"
-    } else {
-        "success"
-    };
+    let status = ResponseStatus::classify(results.is_empty(), !providers_failed.is_empty());
 
     Ok(SearchResponse {
-        version: "1".into(),
-        status: status.into(),
+        version: ENVELOPE_VERSION.to_string(),
+        status: status.as_str().to_string(),
         query: query.to_string(),
         mode: mode.to_string(),
         results,
+        answers: Vec::new(),
         metadata: ResponseMetadata {
             elapsed_ms: elapsed.as_millis(),
             result_count,
             providers_queried,
             providers_failed,
+            providers_cancelled: Vec::new(),
+            provider_results,
+            warnings,
+            cached: false,
+            cache_age_secs: None,
+            provider_failures,
         },
     })
 }
 
+/// Extend `results` on success; capture a structured failure (reason + category)
+/// on error or timeout. Shared by every special-mode provider call.
+fn record_result(
+    outcome: Result<Result<Vec<SearchResult>, SearchError>, tokio::time::error::Elapsed>,
+    provider: &'static str,
+    results: &mut Vec<SearchResult>,
+    failed: &mut Vec<String>,
+    failures: &mut Vec<ProviderFailure>,
+    counts: &mut BTreeMap<String, usize>,
+) {
+    match outcome {
+        Ok(Ok(items)) => {
+            if !items.is_empty() {
+                counts.insert(provider.to_string(), items.len());
+            }
+            results.extend(items);
+        }
+        Ok(Err(e)) => {
+            tracing::warn!("{provider}: {e}");
+            failures.push(e.to_provider_failure(provider));
+            failed.push(provider.to_string());
+        }
+        Err(_) => {
+            tracing::warn!("{provider}: timed out");
+            failures.push(timeout_failure(provider));
+            failed.push(provider.to_string());
+        }
+    }
+}
+
+/// Zero providers ran. With `-p` that's the caller's filter excluding (or
+/// selecting unconfigured) providers — a bad-input error naming the mode's
+/// real provider set. Without `-p` it's a configuration problem. The old
+/// blanket "No providers configured for mode X / run config check" misled:
+/// config check shows all green when a -p filter was the actual cause.
+fn no_providers_error(mode: Mode, only_providers: &Option<Vec<String>>) -> SearchError {
+    match only_providers {
+        Some(list) => SearchError::InvalidInput {
+            message: format!(
+                "no provider ran: mode '{}' is served by [{}], but -p {} selected none of them that are configured",
+                mode,
+                registry::spec(mode).providers.join(", "),
+                list.join(",")
+            ),
+        },
+        None => SearchError::NoProviders(mode.to_string()),
+    }
+}
+
+/// Why scraped content is unusable, or None if it looks like real page text.
+/// Two failure classes seen in the wild: undecompressed/binary bytes served
+/// as text (mojibake), and anti-bot challenge pages returned with HTTP 200.
+fn scrape_rejection(content: &str) -> Option<&'static str> {
+    let sample: Vec<char> = content.chars().take(4000).collect();
+    if sample.len() > 200 {
+        let garbage = sample
+            .iter()
+            .filter(|c| **c == '\u{FFFD}' || (c.is_control() && !c.is_whitespace()))
+            .count();
+        if garbage * 20 > sample.len() {
+            return Some("binary or undecodable content");
+        }
+    }
+    // Challenge pages are short; a real article mentioning Cloudflare isn't.
+    if content.chars().count() < 4000 {
+        const CHALLENGE_MARKERS: &[&str] = &[
+            "Checking your browser before accessing",
+            "Just a moment...",
+            "Verifying you are human",
+            "Enable JavaScript and cookies to continue",
+            "cf-browser-verification",
+            "Attention Required! | Cloudflare",
+        ];
+        if CHALLENGE_MARKERS.iter().any(|m| content.contains(m)) {
+            return Some("anti-bot challenge page instead of content");
+        }
+    }
+    None
+}
+
+/// Demote a scrape "success" whose content is garbage to a structured failure
+/// and clear `results`, so the extract/scrape chain escalates to the next
+/// provider instead of returning junk as success.
+fn reject_bad_scrape(
+    provider: &'static str,
+    results: &mut Vec<SearchResult>,
+    failed: &mut Vec<String>,
+    failures: &mut Vec<ProviderFailure>,
+    counts: &mut BTreeMap<String, usize>,
+) {
+    let Some(reason) = results.first().and_then(|r| scrape_rejection(&r.snippet)) else {
+        return;
+    };
+    tracing::warn!("{provider}: {reason}");
+    results.clear();
+    counts.remove(provider);
+    failures.push(ProviderFailure {
+        provider: provider.to_string(),
+        category: FailureCategory::Parse,
+        http_status: None,
+        code: "garbage_content".to_string(),
+        reason: format!("{provider} returned {reason}"),
+        retryable: false,
+    });
+    failed.push(provider.to_string());
+}
+
+/// Failure record for a provider that exceeded its timeout.
+fn timeout_failure(provider: &str) -> ProviderFailure {
+    ProviderFailure {
+        provider: provider.to_string(),
+        category: FailureCategory::Timeout,
+        http_status: None,
+        code: "timeout".to_string(),
+        reason: format!("{provider} timed out"),
+        retryable: true,
+    }
+}
 
 /// Main dispatch: routes to execute_search or execute_special based on mode
 pub async fn run(
@@ -482,29 +719,188 @@ pub async fn run(
     only_providers: &Option<Vec<String>>,
     opts: &SearchOpts,
 ) -> Result<SearchResponse, SearchError> {
-    // For Auto mode, check if it would resolve to a special mode.
-    // If so, route to execute_special with the resolved mode.
-    // Otherwise, pass Mode::Auto to execute_search so speculative execution works.
-    let mut response = if mode == Mode::Auto {
-        let resolved = classify_intent(query);
-        match resolved {
-            Mode::Scholar | Mode::Patents | Mode::Images | Mode::Places | Mode::People
-            | Mode::Similar | Mode::Scrape | Mode::Extract | Mode::Social => {
-                execute_special(ctx, query, resolved, count, only_providers, opts).await?
-            }
-            // Pass Auto to execute_search — it handles speculation + classification internally
-            _ => execute_search(ctx, query, Mode::Auto, count, only_providers, opts).await?,
-        }
-    } else {
-        match mode {
-            Mode::Scholar | Mode::Patents | Mode::Images | Mode::Places | Mode::People
-            | Mode::Similar | Mode::Scrape | Mode::Extract | Mode::Social => {
-                execute_special(ctx, query, mode, count, only_providers, opts).await?
-            }
-            _ => execute_search(ctx, query, mode, count, only_providers, opts).await?,
-        }
+    // Routing is explicit: the caller chose `mode` (default General). No intent
+    // guessing — agents read `agent-info` and pick the mode/providers. Special
+    // modes use a provider's dedicated method; the rest aggregate the mode's
+    // provider set.
+    let mut response = match mode {
+        Mode::Scholar
+        | Mode::Patents
+        | Mode::Images
+        | Mode::Places
+        | Mode::People
+        | Mode::Similar
+        | Mode::Scrape
+        | Mode::Extract
+        | Mode::Social => execute_special(ctx, query, mode, count, only_providers, opts).await?,
+        _ => execute_search(ctx, query, mode, count, only_providers, opts).await?,
     };
 
     response.metadata.result_count = response.results.len();
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{fuse_rrf, is_synthetic_answer, normalize_url};
+    use crate::types::SearchResult;
+
+    fn result(url: &str, source: &str) -> SearchResult {
+        SearchResult {
+            title: url.to_string(),
+            url: url.to_string(),
+            snippet: String::new(),
+            source: source.to_string(),
+            published: None,
+            image_url: None,
+            extra: None,
+        }
+    }
+
+    #[test]
+    fn rrf_consensus_beats_single_provider_top_rank() {
+        // URL found by two providers (at ranks 2 and 2) must outrank a URL
+        // only one provider returned at rank 1.
+        let buckets = vec![
+            (
+                "a".to_string(),
+                vec![
+                    result("https://only-a.com", "a"),
+                    result("https://both.com", "a"),
+                ],
+            ),
+            (
+                "b".to_string(),
+                vec![
+                    result("https://only-b.com", "b"),
+                    result("https://both.com", "b"),
+                ],
+            ),
+        ];
+        let fused = fuse_rrf(buckets);
+        assert_eq!(fused[0].url, "https://both.com");
+        assert_eq!(fused.len(), 3);
+    }
+
+    #[test]
+    fn rrf_is_independent_of_bucket_arrival_order() {
+        let mk = |first: &str, second: &str| {
+            vec![
+                (
+                    first.to_string(),
+                    vec![
+                        result("https://x.com", first),
+                        result("https://y.com", first),
+                    ],
+                ),
+                (
+                    second.to_string(),
+                    vec![
+                        result("https://y.com", second),
+                        result("https://z.com", second),
+                    ],
+                ),
+            ]
+        };
+        let urls = |buckets| {
+            fuse_rrf(buckets)
+                .into_iter()
+                .map(|r| r.url)
+                .collect::<Vec<_>>()
+        };
+        // y.com has consensus and wins in both arrival orders.
+        assert_eq!(urls(mk("a", "b"))[0], "https://y.com");
+        assert_eq!(urls(mk("b", "a"))[0], "https://y.com");
+    }
+
+    #[test]
+    fn rrf_records_consensus_in_extra() {
+        let buckets = vec![
+            ("a".to_string(), vec![result("https://both.com", "a")]),
+            ("b".to_string(), vec![result("https://both.com", "b")]),
+        ];
+        let fused = fuse_rrf(buckets);
+        let also = fused[0].extra.as_ref().unwrap()["also_found_by"].clone();
+        assert_eq!(also, serde_json::json!(["b"]));
+    }
+
+    #[test]
+    fn scrape_rejection_catches_binary_and_challenge_pages() {
+        use super::scrape_rejection;
+        // Mojibake: mostly replacement characters.
+        let binary: String = "\u{FFFD}x\u{FFFD}\u{FFFD}".repeat(100);
+        assert!(scrape_rejection(&binary).is_some());
+        // Cloudflare interstitial served as 200.
+        assert!(
+            scrape_rejection("## Checking your browser before accessing\nexample.com").is_some()
+        );
+        // Real prose passes, even when long or mentioning Cloudflare.
+        let article = format!(
+            "How Cloudflare works. {}",
+            "Real sentence with ordinary words. ".repeat(300)
+        );
+        assert!(scrape_rejection(&article).is_none());
+        assert!(scrape_rejection("Short but real snippet about rust.").is_none());
+    }
+
+    #[test]
+    fn synthetic_answers_are_detected_by_scheme() {
+        assert!(is_synthetic_answer(&result(
+            "perplexity://answer",
+            "perplexity"
+        )));
+        assert!(is_synthetic_answer(&result("tavily://answer", "tavily")));
+        assert!(!is_synthetic_answer(&result(
+            "https://x.com/search?q=a",
+            "xai"
+        )));
+        // A malformed/scheme-less URL is still a result — it must not
+        // silently vanish into answers[].
+        assert!(!is_synthetic_answer(&result("example.com/page", "serper")));
+        assert!(!is_synthetic_answer(&result("", "serper")));
+    }
+
+    #[test]
+    fn dedupes_scheme_and_leading_www() {
+        assert_eq!(
+            normalize_url("https://www.example.com/"),
+            normalize_url("http://example.com")
+        );
+    }
+
+    #[test]
+    fn preserves_query_string_so_paginated_urls_stay_distinct() {
+        assert_ne!(
+            normalize_url("https://x.com/r?page=1"),
+            normalize_url("https://x.com/r?page=2")
+        );
+    }
+
+    #[test]
+    fn tracking_params_do_not_defeat_dedup() {
+        assert_eq!(
+            normalize_url("https://a.com/post?utm_source=x&utm_medium=y"),
+            normalize_url("https://a.com/post")
+        );
+        assert_eq!(
+            normalize_url("https://a.com/post?fbclid=abc"),
+            normalize_url("https://a.com/post")
+        );
+        // Meaningful params survive alongside stripped trackers.
+        assert_eq!(
+            normalize_url("https://a.com/r?page=2&gclid=zz"),
+            normalize_url("https://a.com/r?page=2")
+        );
+    }
+
+    #[test]
+    fn does_not_strip_www_inside_path() {
+        assert!(normalize_url("https://site.com/files/www.report.pdf").contains("www.report.pdf"));
+    }
+
+    #[test]
+    fn does_not_rewrite_http_inside_query() {
+        assert!(normalize_url("https://a.com/x?redirect=http://b.com")
+            .contains("redirect=http://b.com"));
+    }
 }
