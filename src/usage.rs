@@ -206,7 +206,8 @@ async fn linkup_usage(ctx: &AppContext, key: String) -> Result<serde_json::Value
 /// API come back `supported: false`; unconfigured ones are skipped for
 /// network calls but still listed.
 /// Confirmed no supported balance API (dashboard-only) as of 2026-07:
-/// perplexity, serper, parallel, browserless, jina. Exa exposes only
+/// perplexity, serper, parallel, browserless, jina. Kagi API v1 (2026-10)
+/// reports no balance in responses and has no balance endpoint. Exa exposes only
 /// cost-over-time per key id (no remaining balance) — not wired up.
 pub async fn collect(ctx: Arc<AppContext>) -> Vec<ProviderUsage> {
     type UsageFetch = fn(
@@ -309,6 +310,7 @@ fn resolve_provider_key(ctx: &AppContext, name: &str) -> String {
         "exa" => providers::resolve_key(&k.exa, "EXA_API_KEY"),
         "jina" => providers::resolve_key(&k.jina, "JINA_API_KEY"),
         "linkup" => providers::resolve_key(&k.linkup, "LINKUP_API_KEY"),
+        "kagi" => providers::resolve_key(&k.kagi, "KAGI_API_KEY"),
         "tavily" => providers::resolve_key(&k.tavily, "TAVILY_API_KEY"),
         "brave" => providers::resolve_key(&k.brave, "BRAVE_API_KEY"),
         "serper" => providers::resolve_key(&k.serper, "SERPER_API_KEY"),

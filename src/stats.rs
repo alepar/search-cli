@@ -18,6 +18,7 @@ fn estimated_cost_per_call(provider: &str) -> f64 {
         "brave" => 0.005,
         "parallel" => 0.005,
         "linkup" => 0.0055,
+        "kagi" => 0.012,
         "exa" => 0.007,
         "tavily" => 0.010,
         "serpapi" => 0.010,

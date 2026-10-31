@@ -3,6 +3,7 @@ pub mod browserless;
 pub mod exa;
 pub mod firecrawl;
 pub mod jina;
+pub mod kagi;
 pub mod linkup;
 pub mod parallel;
 pub mod perplexity;
@@ -188,6 +189,7 @@ pub fn build_providers(ctx: &Arc<AppContext>) -> Vec<Box<dyn Provider>> {
         Box::new(exa::Exa::new(ctx.clone())),
         Box::new(jina::Jina::new(ctx.clone())),
         Box::new(linkup::Linkup::new(ctx.clone())),
+        Box::new(kagi::Kagi::new(ctx.clone())),
         #[cfg(feature = "stealth")]
         Box::new(stealth::Stealth::new(ctx.clone())),
         Box::new(firecrawl::Firecrawl::new(ctx.clone())),

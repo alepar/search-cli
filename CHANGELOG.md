@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Kagi added as the 14th provider (general/news/deep). Uses Kagi Search API
+  v1 (`POST https://kagi.com/api/v1/search`, Bearer auth), open to all Kagi
+  accounts as a public preview, billed per request ($12 per 1,000). Key:
+  `KAGI_API_KEY`, `SEARCH_KEYS_KAGI` or `keys.kagi`. `-d`/`--exclude-domain`
+  map to an inline lens, `-f` to `filters.after`, `--country` to
+  `filters.region`; `--lang` is not supported by the API. Kagi v1 reports no
+  balance, so `search usage` lists it as unsupported; `search stats` estimates
+  $0.012 per call. A malformed key (Kagi answers HTTP 400
+  `general.invalid_token`) is reported as an auth failure.
+
 ## 0.9.0 — 2026-07-25
 
 ### Terminal login
