@@ -561,7 +561,15 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             // entry (an ungated save here used to let a filtered result be
             // replayed for a later unfiltered query). --no-cache skips the
             // read but still refreshes the entry.
-            let mode_str = args.mode.to_string();
+            let mut mode_str = args.mode.to_string();
+            // reddit.reader changes what extract returns for the same URL; an
+            // agent re-running extract right after the opt-in must not get
+            // the cached index copy back.
+            let reader = app.config.reddit.reader.trim();
+            if matches!(args.mode, types::Mode::Extract | types::Mode::Scrape) && !reader.is_empty()
+            {
+                mode_str = format!("{mode_str}+reddit-reader={reader}");
+            }
             let cacheable = args.providers.is_none()
                 && opts.include_domains.is_empty()
                 && opts.exclude_domains.is_empty()

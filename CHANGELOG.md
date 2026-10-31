@@ -12,6 +12,12 @@
   the scraper chain, which only collects Reddit's block pages. Non-thread
   URLs and threads no index holds fail with `no_sanctioned_route` (category
   `blocked`). reddit.com itself is never requested.
+- Opt-in `reddit.reader = "jina"` (`SEARCH_REDDIT_READER`): extract renders
+  the full live thread through Jina Reader (`extra.copy: "live_render"`) and
+  falls back to the index copy. Outside Reddit's terms for automated access;
+  off by default, warns on every use. While unset, index copies carry
+  `extra.reader_hint` so agents can offer the opt-in. The query cache keys
+  extract results on this setting.
 - extract/scrape: papers are read by identifier instead of through
   publisher pages, which sit behind bot walls and robots rules naming AI
   agents. A DOI (doi.org or embedded in a publisher URL or query), arXiv id,

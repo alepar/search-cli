@@ -13,6 +13,11 @@
 //! route recovers one thread's indexed copy from the Perplexity Search API by
 //! post ID. Both say where the text came from, and neither falls back to
 //! fetching reddit.com.
+//!
+//! One opt-in departs from that: with `reddit.reader = "jina"` the extract
+//! route asks Jina Reader to render the live thread, which reddit.com's terms
+//! do not sanction, and falls back to the indexed copy when that fails. It is
+//! off unless the user sets it, and every use logs a warning.
 
 use crate::context::AppContext;
 use crate::errors::SearchError;
@@ -20,6 +25,7 @@ use crate::providers::perplexity::{self, Perplexity};
 use crate::types::{SearchOpts, SearchResult};
 use serde_json::json;
 use std::sync::Arc;
+use std::time::Duration;
 use url::Url;
 
 /// Domain scope the reddit mode forces on every provider.
@@ -30,6 +36,14 @@ pub const DOMAIN: &str = "reddit.com";
 const EXTRACT_TOKENS_PER_PAGE: u32 = 4096;
 /// Candidate pages examined for the target post ID.
 const EXTRACT_CANDIDATES: usize = 10;
+/// Jina Reader takes about 40 s to render a Reddit thread. The route's own
+/// 60 s budget leaves room for the index fallback after this.
+const JINA_DEADLINE: Duration = Duration::from_secs(45);
+/// Shown with every index copy while `reddit.reader` is unset, so an agent
+/// can offer the opt-in. Setting either value silences it.
+pub const READER_HINT: &str = "Full live threads are available through Jina Reader as an opt-in \
+     (outside Reddit's terms): `search config set reddit.reader jina`; \
+     `search config set reddit.reader index` keeps index copies and hides this hint";
 
 /// A Reddit thread, identified by its base-36 post ID.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,19 +68,21 @@ impl ThreadRef {
         }
     }
 
-    /// Words to find this thread in a search index: the title slug and the
-    /// subreddit. Without a slug only the subreddit and ID are left, which
-    /// indexes rarely match.
-    fn search_query(&self) -> String {
-        let mut parts = Vec::new();
-        match &self.slug {
-            Some(slug) => parts.push(slug.replace('_', " ")),
-            None => parts.push(self.id.clone()),
-        }
-        if let Some(sub) = &self.subreddit {
-            parts.push(format!("r/{sub}"));
-        }
-        parts.join(" ")
+    /// Queries to find this thread in a search index, best first: the
+    /// title slug, then the bare post ID (which also covers a truncated or
+    /// edited slug), each with the subreddit.
+    fn search_queries(&self) -> Vec<String> {
+        let with_sub = |q: String| match &self.subreddit {
+            Some(sub) => format!("{q} r/{sub}"),
+            None => q,
+        };
+        let mut queries: Vec<String> = self
+            .slug
+            .iter()
+            .map(|slug| with_sub(slug.replace('_', " ")))
+            .collect();
+        queries.push(with_sub(self.id.clone()));
+        queries
     }
 }
 
@@ -181,9 +197,11 @@ impl Reddit {
         Self { ctx }
     }
 
-    /// The thread's indexed copy, found in the Perplexity Search API by post
-    /// ID. Errors with `no_sanctioned_route` when the URL is not a thread or
-    /// no index holds it; reddit.com itself is never requested.
+    /// One thread for extract. By default its indexed copy, found in the
+    /// Perplexity Search API by post ID. With `reddit.reader = "jina"`, the
+    /// live thread rendered by Jina Reader first. Errors with
+    /// `no_sanctioned_route` when the URL is not a thread or nothing could be
+    /// read.
     pub async fn fetch_thread(&self, url: &Url) -> Result<Vec<SearchResult>, SearchError> {
         let Some(thread) = parse_thread(url) else {
             return Err(no_route(
@@ -192,6 +210,54 @@ impl Reddit {
                  `search -m reddit -q <topic>`",
             ));
         };
+        match Reader::from_config(&self.ctx.config.reddit.reader) {
+            Reader::Jina => {
+                let live_error = match self.live_render(&thread).await {
+                    Ok(page) => return Ok(vec![page]),
+                    Err(e) => e,
+                };
+                tracing::warn!("reddit: Jina Reader failed ({live_error}); using the index copy");
+                let mut copy = self.index_copy(&thread).await?;
+                set_extra(&mut copy, "live_render_error", json!(live_error));
+                Ok(vec![copy])
+            }
+            Reader::Index { hint } => {
+                let mut copy = self.index_copy(&thread).await?;
+                if hint {
+                    set_extra(&mut copy, "reader_hint", json!(READER_HINT));
+                }
+                Ok(vec![copy])
+            }
+        }
+    }
+
+    /// The live thread through Jina Reader. A wall or an empty page counts
+    /// as a failure, so the caller falls back to the index.
+    async fn live_render(&self, thread: &ThreadRef) -> Result<SearchResult, String> {
+        tracing::warn!(
+            "reddit: reading the live thread through Jina Reader (reddit.reader = jina); \
+             Reddit's terms do not permit unauthorised automated access"
+        );
+        let jina = super::jina::Jina::new(self.ctx.clone());
+        let pages = jina
+            .read_url_within(&thread.canonical_url(), JINA_DEADLINE)
+            .await
+            .map_err(|e| e.to_string())?;
+        let page = pages
+            .into_iter()
+            .next()
+            .ok_or_else(|| "empty response".to_string())?;
+        if page.snippet.trim().is_empty() {
+            return Err("empty page".to_string());
+        }
+        if let Some(wall) = crate::walls::classify_content(&page.snippet) {
+            return Err(format!("Jina Reader returned a {}", wall.code()));
+        }
+        Ok(live_result(thread, page))
+    }
+
+    /// The thread's copy in the Perplexity Search API, or `no_sanctioned_route`.
+    async fn index_copy(&self, thread: &ThreadRef) -> Result<SearchResult, SearchError> {
         let pplx = Perplexity::new(self.ctx.clone());
         let opts = scoped_opts(&SearchOpts::default());
         let lookup = |query: String| {
@@ -201,11 +267,18 @@ impl Reddit {
                     .await
             }
         };
-        let mut copy = pick_thread_copy(&thread, lookup(thread.search_query()).await?);
-        // Excerpts follow the query. Searched by bare ID (a redd.it or
-        // slugless link), the index finds the thread but picks text that
-        // matches nothing, so ask again with the title it reported.
-        if let (None, Some(first)) = (&thread.slug, &copy) {
+        let mut copy = None;
+        let mut by_slug = false;
+        for (i, query) in thread.search_queries().into_iter().enumerate() {
+            copy = pick_thread_copy(thread, lookup(query).await?);
+            if copy.is_some() {
+                by_slug = i == 0 && thread.slug.is_some();
+                break;
+            }
+        }
+        // Excerpts follow the query. Found by bare ID, the index picks text
+        // that matches nothing, so ask again with the title it reported.
+        if let (false, Some(first)) = (by_slug, &copy) {
             let query = match first.extra.as_ref().and_then(|e| e["subreddit"].as_str()) {
                 Some(sub) => format!("{} r/{sub}", first.title),
                 None => first.title.clone(),
@@ -213,19 +286,66 @@ impl Reddit {
             let retry = lookup(query)
                 .await
                 .ok()
-                .and_then(|pages| pick_thread_copy(&thread, pages));
+                .and_then(|pages| pick_thread_copy(thread, pages));
             if let Some(better) = retry.filter(|b| b.snippet.len() > first.snippet.len()) {
                 copy = Some(better);
             }
         }
         match copy {
-            Some(copy) => Ok(vec![copy]),
+            Some(copy) => Ok(copy),
             None => Err(no_route(&format!(
                 "no search index holds a copy of this thread, and Reddit blocks automated \
                  fetches. Open it in a browser: {}",
                 thread.canonical_url()
             ))),
         }
+    }
+}
+
+/// What `reddit.reader` selects. Anything but "jina" reads the index; only an
+/// unset value carries the opt-in hint.
+#[derive(Debug, PartialEq, Eq)]
+enum Reader {
+    Index { hint: bool },
+    Jina,
+}
+
+impl Reader {
+    fn from_config(value: &str) -> Self {
+        match value.trim() {
+            "jina" => Self::Jina,
+            "" => Self::Index { hint: true },
+            _ => Self::Index { hint: false },
+        }
+    }
+}
+
+fn set_extra(r: &mut SearchResult, key: &str, value: serde_json::Value) {
+    if let Some(obj) = r.extra.get_or_insert_with(|| json!({})).as_object_mut() {
+        obj.insert(key.to_string(), value);
+    }
+}
+
+/// A Jina-rendered page as a Reddit result. Collapsed replies ("More
+/// replies") are not expanded, so it is not the complete comment tree.
+fn live_result(thread: &ThreadRef, page: SearchResult) -> SearchResult {
+    let mut extra = json!({
+        "post_id": thread.id,
+        "retrieved_via": "jina_reader",
+        "copy": "live_render",
+        "complete": false,
+    });
+    if let Some(sub) = &thread.subreddit {
+        extra["subreddit"] = json!(sub);
+    }
+    SearchResult {
+        title: page.title,
+        url: thread.canonical_url(),
+        snippet: page.snippet,
+        source: Reddit::NAME.to_string(),
+        published: None,
+        image_url: None,
+        extra: Some(extra),
     }
 }
 
@@ -343,7 +463,15 @@ mod tests {
         }
         let t = thread("https://www.reddit.com/r/rust/comments/i5hppj/smol_vs_tokio/").unwrap();
         assert_eq!(t.slug.as_deref(), Some("smol_vs_tokio"));
-        assert_eq!(t.search_query(), "smol vs tokio r/rust");
+        assert_eq!(
+            t.search_queries(),
+            vec![
+                "smol vs tokio r/rust".to_string(),
+                "i5hppj r/rust".to_string()
+            ]
+        );
+        let short = thread("https://redd.it/1jc6gis").unwrap();
+        assert_eq!(short.search_queries(), vec!["1jc6gis".to_string()]);
     }
 
     #[test]
@@ -443,6 +571,26 @@ mod tests {
         assert_eq!(extra["retrieved_via"], "perplexity_search");
         assert_eq!(extra["subreddit"], "rust");
         assert_eq!(extra["index_last_updated"], "2025-11-03");
+    }
+
+    #[test]
+    fn reader_config_values() {
+        assert_eq!(Reader::from_config(""), Reader::Index { hint: true });
+        assert_eq!(Reader::from_config("  "), Reader::Index { hint: true });
+        assert_eq!(Reader::from_config("index"), Reader::Index { hint: false });
+        assert_eq!(Reader::from_config("jina"), Reader::Jina);
+    }
+
+    #[test]
+    fn live_result_is_labelled_as_a_render() {
+        let t = thread("https://old.reddit.com/r/rust/comments/i5hppj/smol/").unwrap();
+        let r = live_result(&t, result("https://r.jina.ai/x", "# Title\nComments"));
+        assert_eq!(r.url, "https://www.reddit.com/r/rust/comments/i5hppj/");
+        assert_eq!(r.source, "reddit");
+        let extra = r.extra.unwrap();
+        assert_eq!(extra["copy"], "live_render");
+        assert_eq!(extra["retrieved_via"], "jina_reader");
+        assert_eq!(extra["subreddit"], "rust");
     }
 
     #[test]

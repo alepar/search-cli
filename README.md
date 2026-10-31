@@ -162,6 +162,17 @@ Both Reddit paths read search indexes that already hold Reddit pages:
   thread (a subreddit, user page or share link), the result is an error with
   category `blocked` and code `no_sanctioned_route`, and the generic scraper
   chain does not run. `-p` without `reddit` skips this route.
+- Full live threads are an opt-in: `search config set reddit.reader jina`
+  (or `SEARCH_REDDIT_READER=jina`). Extract then asks Jina Reader to render the
+  thread (the post and every visible comment, collapsed replies excepted,
+  about 10-40 s), labelled `extra.copy: "live_render"`, and falls back to the
+  index copy if Jina fails or returns a wall (`extra.live_render_error` says
+  why). This is not a sanctioned route: Reddit's terms bar unauthorised
+  automated access, Jina's terms make the customer responsible for the
+  sources it reads, and Reddit can block Jina at any time. Every use logs a
+  warning. While `reddit.reader` is unset, index copies carry
+  `extra.reader_hint` offering the opt-in; `search config set reddit.reader
+  index` keeps index copies and removes the hint.
 
 Both need a Perplexity key; `-m reddit` also uses whichever of the other four
 engines are configured. Terms posture: these are ordinary calls to search

@@ -130,12 +130,31 @@ impl Jina {
     /// extract chain has a remote rung even when no provider is configured;
     /// a configured key is sent for the higher limit.
     pub async fn read_url(&self, url: &str) -> Result<Vec<SearchResult>, SearchError> {
-        let reader_url = format!("https://r.jina.ai/{url}");
-        let client = &self.ctx.client;
-        let key = self.api_key();
+        super::retry_request(|| self.fetch_reader(url, None)).await
+    }
 
-        super::retry_request(|| async {
-            let mut req = client.get(&reader_url);
+    /// One Reader call with its own deadline and no retry, for pages that
+    /// take longer to render than the shared client's timeout allows.
+    pub async fn read_url_within(
+        &self,
+        url: &str,
+        deadline: std::time::Duration,
+    ) -> Result<Vec<SearchResult>, SearchError> {
+        self.fetch_reader(url, Some(deadline)).await
+    }
+
+    async fn fetch_reader(
+        &self,
+        url: &str,
+        deadline: Option<std::time::Duration>,
+    ) -> Result<Vec<SearchResult>, SearchError> {
+        let reader_url = format!("https://r.jina.ai/{url}");
+        let key = self.api_key();
+        {
+            let mut req = self.ctx.client.get(&reader_url);
+            if let Some(d) = deadline {
+                req = req.timeout(d);
+            }
             if !key.is_empty() {
                 req = req.bearer_auth(&key);
             }
@@ -167,7 +186,6 @@ impl Jina {
                 image_url: None,
                 extra: None,
             }])
-        })
-        .await
+        }
     }
 }
