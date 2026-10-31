@@ -198,8 +198,8 @@ pub struct ResponseMetadata {
     /// Names of providers that failed. Kept for backward compatibility; see
     /// `provider_failures` for the reason behind each.
     pub providers_failed: Vec<String>,
-    /// Providers cancelled by the early-stop grace window after enough unique
-    /// results had already arrived. They neither failed nor contributed.
+    /// Providers started but neither returned nor failed. Normally empty:
+    /// fused modes wait for every provider within its own timeout.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub providers_cancelled: Vec<String>,
     /// Results each provider actually contributed (pre-dedup), so the fused

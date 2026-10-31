@@ -637,3 +637,14 @@ fn test_performance_benchmark() {
     eprintln!("    min:  {}ms", min);
     eprintln!("    max:  {}ms", max);
 }
+
+#[test]
+fn test_agent_info_describes_collection_and_count_clamping() {
+    let output = search_cmd().args(["agent-info"]).output().unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("Fused modes wait for every provider"));
+    assert!(text.contains("per-provider timeout"));
+    assert!(text.contains("clamped to that provider's per-request maximum"));
+    assert!(!text.contains("early-stop grace"));
+    assert!(!text.contains("1.5s grace"));
+}
