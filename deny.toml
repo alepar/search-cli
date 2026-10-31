@@ -4,7 +4,18 @@
 
 [advisories]
 yanked = "deny"
-ignore = []
+ignore = [
+    # zstd 0.13 / zstd-safe 7, pulled only by wreq-util 0.2 (opt-in stealth
+    # feature, not in release binaries) for TLS certificate decompression.
+    # wreq-util's `emulation` feature hard-requires zstd ^0.13 and the fixes
+    # are in zstd 0.14 / zstd-safe 8. 0391 (encoder context reuse) and 0398
+    # (seekable API) are not on that path; 0403 (legacy-frame streaming
+    # decode) is reachable from a hostile server's certificate. Drop these
+    # once wreq-util moves to zstd 0.14.
+    "RUSTSEC-2026-0391",
+    "RUSTSEC-2026-0398",
+    "RUSTSEC-2026-0403",
+]
 
 [licenses]
 allow = [
