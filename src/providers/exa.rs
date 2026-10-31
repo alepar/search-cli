@@ -210,6 +210,12 @@ impl Exa {
         url: &str,
         count: usize,
     ) -> Result<Vec<SearchResult>, SearchError> {
+        // /findSimilar is marked deprecated in Exa's OpenAPI spec (no sunset
+        // date), which suggests /search with a query describing the source
+        // instead. Checked live (2026-10-31): /search with the URL as query
+        // returns pages about the same site rather than similar sites, so
+        // this stays on /findSimilar until Exa removes it or ships a
+        // like-for-like replacement.
         let body = json!({ "url": url, "numResults": count, "contents": { "text": true } });
         let resp = self.post_api("findSimilar", body).await?;
         Ok(to_results(resp, "exa_similar"))
