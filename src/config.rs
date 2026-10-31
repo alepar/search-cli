@@ -79,6 +79,11 @@ pub struct Settings {
     pub timeout: u64,
     #[serde(default = "default_count")]
     pub count: usize,
+    /// Contact address sent to scholarly APIs that ask for one (Crossref and
+    /// OpenAlex `mailto`, Unpaywall `email`). Empty = not sent; Unpaywall is
+    /// then skipped.
+    #[serde(default)]
+    pub email: String,
 }
 
 fn default_timeout() -> u64 {
@@ -109,6 +114,7 @@ impl Default for AppConfig {
             settings: Settings {
                 timeout: default_timeout(),
                 count: default_count(),
+                email: String::new(),
             },
             metasearch: Metasearch::default(),
             xai: XaiConfig::default(),
@@ -175,7 +181,7 @@ pub const PROVIDER_KEYS: &[&str] = &[
 ];
 
 /// Valid setting names for `config set settings.<name>`.
-pub const SETTING_KEYS: &[&str] = &["timeout", "count"];
+pub const SETTING_KEYS: &[&str] = &["timeout", "count", "email"];
 
 /// Valid field names for `config set metasearch.<name>`.
 pub const METASEARCH_KEYS: &[&str] = &["token", "email", "url"];
@@ -274,9 +280,15 @@ pub fn config_show(config: &AppConfig) {
             "count".white(),
             config.settings.count.to_string().cyan()
         );
+        println!(
+            "    {:<10} {}",
+            "email".white(),
+            display_email(&config.settings.email).cyan()
+        );
     } else {
         println!("  timeout  = {}s", config.settings.timeout);
         println!("  count    = {}", config.settings.count);
+        println!("  email    = {}", display_email(&config.settings.email));
     }
 
     println!();
@@ -452,6 +464,14 @@ fn write_config_atomic(path: &std::path::Path, doc: &toml::Table) -> Result<(), 
     Ok(())
 }
 
+fn display_email(email: &str) -> &str {
+    if email.is_empty() {
+        "(not set)"
+    } else {
+        email
+    }
+}
+
 /// Coerce a `settings.*` value to the TOML type figment expects. `timeout` and
 /// `count` are integers; writing them as strings breaks deserialization.
 fn parse_setting(name: &str, value: &str) -> Result<toml::Value, SearchError> {
@@ -464,6 +484,7 @@ fn parse_setting(name: &str, value: &str) -> Result<toml::Value, SearchError> {
             })?;
             Ok(toml::Value::Integer(n as i64))
         }
+        "email" => Ok(toml::Value::String(value.to_string())),
         other => Err(SearchError::Config(format!(
             "Unknown setting 'settings.{other}'. Valid: {}",
             SETTING_KEYS.join(", ")
