@@ -63,8 +63,12 @@
   query: `search "rust tokio" -p tavily -c 2` and `search -p tavily "rust
   tokio"` now both search "rust tokio" with Tavily. Before, trailing options
   were searched as literal text and leading ones were rejected. `search search`
-  also takes the query as bare words; a word starting with `-` needs `--`
-  first.
+  also takes the query as bare words. After the first query word only exact
+  search options count, so operators such as `jaguar -car` or
+  `-site:pinterest.com` stay part of the query.
+- `search update --check` compares versions as semver, matching what
+  `search update` installs; a local build newer than the latest release no
+  longer reports an update.
 - Serper places results get a URL (the business website, else a Google Maps
   link from the place's `cid`) and the address as the snippet; places items
   carry no `link`.

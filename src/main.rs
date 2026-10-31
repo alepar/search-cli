@@ -57,13 +57,20 @@ const GLOBAL_FLAG_TOKENS: &[&str] = &["--json", "--quiet", "--last", "--x", "--d
 
 /// Expand the bare-query shorthand into the `search` subcommand, so search
 /// options work on either side of the query: `search "q" -p tavily -c 2` and
-/// `search -p tavily "q"` both become `search search ...`. The first token
-/// that is not a global flag decides: a subcommand name or a top-level
-/// help/version flag leaves argv untouched; anything else (query words, -q,
-/// -p, -m, ...) is a search.
+/// `search -p tavily "q"` both become `search search ... -- q`. The first
+/// token that is not a global flag decides: a subcommand name or a top-level
+/// help/version flag leaves argv untouched; anything else is a search.
+///
+/// Before the first query word, tokens go to clap as written. After it, a
+/// token is an option only if it is exactly a search option (`-c 2`,
+/// `--count=2`, `--json`); anything else is a query word, so search
+/// operators such as `jaguar -car` or `-site:pinterest.com` stay literal
+/// instead of parsing as `-c ar` or `-s ite:...`. Query words are placed
+/// after `--` so clap never reads them as options.
 fn expand_bare_query(
     argv: Vec<std::ffi::OsString>,
     subcommands: &[String],
+    options: &[SearchOption],
 ) -> Vec<std::ffi::OsString> {
     let first = argv
         .iter()
@@ -80,9 +87,85 @@ fn expand_bare_query(
     if keep {
         return argv;
     }
-    let mut out = argv;
-    out.insert(1, "search".into());
+
+    let mut args = argv.into_iter();
+    let mut out: Vec<std::ffi::OsString> = vec![args.next().unwrap_or_default(), "search".into()];
+    let mut words = Vec::new();
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            words.extend(args.by_ref());
+            break;
+        }
+        let tok = arg.to_str().unwrap_or_default();
+        let is_option = |o: &&SearchOption| {
+            o.names.iter().any(|n| n == tok)
+                || o.names
+                    .iter()
+                    .any(|n| n.starts_with("--") && tok.starts_with(&format!("{n}=")))
+        };
+        if words.is_empty() && tok.starts_with('-') {
+            // Before the query: pass through for clap to parse (or reject).
+            let takes_value = options
+                .iter()
+                .find(is_option)
+                .is_some_and(|o| o.takes_value && !tok.contains('='));
+            out.push(arg);
+            if takes_value && let Some(v) = args.next() {
+                out.push(v);
+            }
+        } else if let Some(o) = options.iter().find(is_option) {
+            out.push(arg.clone());
+            if o.takes_value
+                && !tok.contains('=')
+                && let Some(v) = args.next()
+            {
+                out.push(v);
+            }
+        } else {
+            words.push(arg);
+        }
+    }
+    if !words.is_empty() {
+        out.push("--".into());
+        out.extend(words);
+    }
     out
+}
+
+/// A `search` subcommand option as spelled on the command line.
+struct SearchOption {
+    /// `-c`, `--count`, plus global flags such as `--json`.
+    names: Vec<String>,
+    takes_value: bool,
+}
+
+/// Every option the `search` subcommand accepts, global flags included.
+fn search_options() -> Vec<SearchOption> {
+    use clap::CommandFactory;
+    let mut cmd = Cli::command();
+    cmd.build();
+    let search = cmd
+        .find_subcommand("search")
+        .expect("search subcommand exists");
+    search
+        .get_arguments()
+        .filter(|a| !a.is_positional())
+        .map(|a| SearchOption {
+            names: a
+                .get_short_and_visible_aliases()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|c| format!("-{c}"))
+                .chain(
+                    a.get_long_and_visible_aliases()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|l| format!("--{l}")),
+                )
+                .collect(),
+            takes_value: a.get_action().takes_values(),
+        })
+        .collect()
 }
 
 /// Names and aliases of every subcommand, plus clap's implicit `help`.
@@ -147,7 +230,11 @@ async fn main() {
     let json_flag = flags.json;
 
     // 4. CLI Parsing — use try_parse so we own error handling
-    let argv = expand_bare_query(std::env::args_os().collect(), &subcommand_names());
+    let argv = expand_bare_query(
+        std::env::args_os().collect(),
+        &subcommand_names(),
+        &search_options(),
+    );
     let cli = match Cli::try_parse_from(argv) {
         Ok(cli) => cli,
         Err(e) => {
@@ -1113,19 +1200,23 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                         .build()
                         .and_then(|u| u.get_latest_release())
                         // The github backend errors on an empty listing, so latest()
-                        // is always Some here.
-                        .map(|releases| {
-                            releases
+                        // is always Some. "Available" is a semver comparison, the
+                        // same rule `search update` installs by: a local build newer
+                        // than the latest release is not offered a downgrade.
+                        .and_then(|releases| {
+                            let available = releases.is_update_available()?;
+                            let latest = releases
                                 .latest()
-                                .map_or_else(|| current.to_string(), |r| r.version().to_string())
+                                .map_or_else(|| current.to_string(), |r| r.version().to_string());
+                            Ok((latest, available))
                         })
                 })
                 .await
                 .map_err(|e| errors::SearchError::Config(format!("update task failed: {e}")))?;
 
                 match res {
-                    Ok(latest) => {
-                        let up_to_date = latest == current;
+                    Ok((latest, available)) => {
+                        let up_to_date = !available;
                         if ctx.is_json() {
                             output::json::render_value(&serde_json::json!({
                                 "version": types::ENVELOPE_VERSION,
@@ -1236,7 +1327,11 @@ mod tests {
     /// Parse argv the way main() does and return the search args.
     fn parse_search(argv: &[&str]) -> cli::SearchArgs {
         let argv = std::iter::once("search").chain(argv.iter().copied());
-        let argv = expand_bare_query(argv.map(Into::into).collect(), &subcommand_names());
+        let argv = expand_bare_query(
+            argv.map(Into::into).collect(),
+            &subcommand_names(),
+            &search_options(),
+        );
         match Cli::try_parse_from(argv).unwrap().command {
             Some(Commands::Search(args)) => args,
             _ => panic!("not a search command"),
@@ -1262,10 +1357,39 @@ mod tests {
     #[test]
     fn global_flags_around_bare_query() {
         let argv = ["search", "--json", "rust", "--quiet"].map(std::ffi::OsString::from);
-        let cli =
-            Cli::try_parse_from(expand_bare_query(argv.to_vec(), &subcommand_names())).unwrap();
+        let cli = Cli::try_parse_from(expand_bare_query(
+            argv.to_vec(),
+            &subcommand_names(),
+            &search_options(),
+        ))
+        .unwrap();
         assert!(cli.json && cli.quiet);
         assert!(matches!(cli.command, Some(Commands::Search(ref a)) if a.words == ["rust"]));
+    }
+
+    #[test]
+    fn dashed_words_after_query_stay_literal() {
+        // Search operators must not parse as -c ar, -s ite:..., -p andas, -q uiz.
+        for (argv, words) in [
+            (&["jaguar", "-car"][..], &["jaguar", "-car"][..]),
+            (
+                &["jaguar", "-site:pinterest.com"],
+                &["jaguar", "-site:pinterest.com"],
+            ),
+            (&["rust", "-pandas", "-c", "3"], &["rust", "-pandas"]),
+            (&["python", "-quiz"], &["python", "-quiz"]),
+        ] {
+            let a = parse_search(argv);
+            assert_eq!(a.words, words, "{argv:?}");
+            assert!(a.providers.is_none(), "{argv:?}");
+        }
+        let a = parse_search(&["rust", "-pandas", "-c", "3"]);
+        assert_eq!(a.count, Some(3));
+        let a = parse_search(&["rust", "--count=4", "-car"]);
+        assert_eq!(
+            (a.count, &a.words[..]),
+            (Some(4), &["rust".to_string(), "-car".into()][..])
+        );
     }
 
     #[test]
@@ -1290,7 +1414,10 @@ mod tests {
             &["search", "help"],
         ] {
             let argv: Vec<std::ffi::OsString> = argv.iter().map(Into::into).collect();
-            assert_eq!(expand_bare_query(argv.clone(), &names), argv);
+            assert_eq!(
+                expand_bare_query(argv.clone(), &names, &search_options()),
+                argv
+            );
         }
     }
 }
