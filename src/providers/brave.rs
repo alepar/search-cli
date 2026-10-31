@@ -63,16 +63,12 @@ fn map_freshness(f: &str) -> &str {
     }
 }
 
+/// Brave web search's documented maximum `count`.
+const WEB_MAX_COUNT: usize = 20;
+
 /// Append site: operators for domain filtering
 fn augment_query(query: &str, opts: &SearchOpts) -> String {
-    let mut q = query.to_string();
-    for d in &opts.include_domains {
-        q = format!("{q} site:{d}");
-    }
-    for d in &opts.exclude_domains {
-        q = format!("{q} -site:{d}");
-    }
-    q
+    super::with_site_operators(query, opts)
 }
 
 #[async_trait]
@@ -109,7 +105,8 @@ impl super::Provider for Brave {
 
         let client = &self.ctx.client;
         let api_key = self.api_key();
-        let count_str = count.to_string();
+        // Web search documents count 1..=20; more fails the request.
+        let count_str = count.min(WEB_MAX_COUNT).to_string();
         let q = augment_query(query, opts);
         let freshness = opts.freshness.as_deref().map(map_freshness);
 

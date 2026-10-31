@@ -101,7 +101,7 @@ pub async fn execute_search(
 
     // Deep mode also pulls Brave's LLM Context (grounding) API alongside Brave
     // web search — querying brave twice (web + grounding) is intentional.
-    if mode == Mode::Deep {
+    if mode == Mode::Deep && provider_allowed("brave", only_providers) {
         let brave = providers::brave::Brave::new(ctx.clone());
         if brave.is_configured() {
             let (q, c, o) = (query_arc.clone(), count, opts.clone());
@@ -164,7 +164,7 @@ pub async fn execute_search(
         };
         match join_result {
             Ok((name, Ok(Ok(items)))) => {
-                let items: Vec<SearchResult> = if reddit {
+                let mut items: Vec<SearchResult> = if reddit {
                     items
                         .into_iter()
                         .filter_map(providers::reddit::to_thread_result)
@@ -172,7 +172,12 @@ pub async fn execute_search(
                 } else {
                     items
                 };
-                for item in &items {
+                // An empty URL is not a fetchable result (and would merge
+                // every such result into one in fusion).
+                items.retain(|r| !r.url.trim().is_empty());
+                // Answers move out of results below, so they must not count
+                // toward -c and arm the early stop.
+                for item in items.iter().filter(|r| !is_synthetic_answer(r)) {
                     unique_urls.insert(normalize_url(&item.url));
                 }
                 buckets.push((name.to_string(), items));
@@ -289,10 +294,12 @@ fn is_synthetic_answer(r: &SearchResult) -> bool {
 /// Reciprocal rank fusion across provider buckets. Each URL scores
 /// Σ 1/(RRF_K + rank) over the providers that returned it, so a result two
 /// engines agree on outranks any single engine's top hit. Deterministic:
-/// independent of provider completion order. Duplicates keep the first-seen
-/// content (by bucket order), enriched with missing fields and an
+/// buckets arrive in provider completion order, so they are sorted by
+/// provider name first, and ties fall back to that order. Duplicates keep
+/// the first-seen content, enriched with missing fields and an
 /// `also_found_by` list in `extra`.
-fn fuse_rrf(buckets: Vec<(String, Vec<SearchResult>)>) -> Vec<SearchResult> {
+fn fuse_rrf(mut buckets: Vec<(String, Vec<SearchResult>)>) -> Vec<SearchResult> {
+    buckets.sort_by(|a, b| a.0.cmp(&b.0));
     struct Fused {
         result: SearchResult,
         score: f64,
@@ -469,14 +476,46 @@ pub async fn execute_special(
 
     match mode {
         Mode::Scholar => {
+            // Registry declares scholar Fused: both providers in parallel,
+            // then RRF, like the fan-out modes.
             let serper = providers::serper::Serper::new(ctx.clone());
-            if serper.is_configured() && provider_allowed("serper", only_providers) {
-                query_provider!("serper", serper.search_scholar(query, count), 10);
-            }
             let serpapi = providers::serpapi::SerpApi::new(ctx.clone());
-            if serpapi.is_configured() && provider_allowed("serpapi", only_providers) {
-                query_provider!("serpapi", serpapi.search_scholar(query, count), 10);
+            let use_serper = serper.is_configured() && provider_allowed("serper", only_providers);
+            let use_serpapi =
+                serpapi.is_configured() && provider_allowed("serpapi", only_providers);
+            let budget = Duration::from_secs(10);
+            let (a, b) = tokio::join!(
+                async {
+                    if use_serper {
+                        Some(timeout(budget, serper.search_scholar(query, count)).await)
+                    } else {
+                        None
+                    }
+                },
+                async {
+                    if use_serpapi {
+                        Some(timeout(budget, serpapi.search_scholar(query, count)).await)
+                    } else {
+                        None
+                    }
+                },
+            );
+            let mut buckets = Vec::new();
+            for (name, outcome) in [("serper", a), ("serpapi", b)] {
+                let Some(outcome) = outcome else { continue };
+                providers_queried.push(name.to_string());
+                let mut items = Vec::new();
+                record_result(
+                    outcome,
+                    name,
+                    &mut items,
+                    &mut providers_failed,
+                    &mut provider_failures,
+                    &mut provider_results,
+                );
+                buckets.push((name.to_string(), items));
             }
+            results = fuse_rrf(buckets);
         }
         Mode::Patents => {
             let serper = providers::serper::Serper::new(ctx.clone());
@@ -869,9 +908,10 @@ mod tests {
                 .map(|r| r.url)
                 .collect::<Vec<_>>()
         };
-        // y.com has consensus and wins in both arrival orders.
+        // y.com has consensus and wins in both arrival orders, and the tied
+        // single-provider tail (x.com, z.com) keeps one order too.
         assert_eq!(urls(mk("a", "b"))[0], "https://y.com");
-        assert_eq!(urls(mk("b", "a"))[0], "https://y.com");
+        assert_eq!(urls(mk("a", "b")), urls(mk("b", "a")));
     }
 
     #[test]

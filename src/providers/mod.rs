@@ -120,6 +120,29 @@ pub fn http_error_message(status: u16, body: &str) -> String {
 
 /// UTC date `days` ago as `YYYY-MM-DD`, without a date-crate dependency.
 /// Used to translate the CLI's freshness words into provider date floors.
+/// Append Google-style site operators for -d / --exclude-domain. Several
+/// includes are OR-ed in one group: bare `site:a site:b` is an AND that no
+/// page can satisfy. Exclusions stay `-site:` conjunctions.
+pub fn with_site_operators(query: &str, opts: &SearchOpts) -> String {
+    let mut q = query.to_string();
+    match opts.include_domains.as_slice() {
+        [] => {}
+        [d] => q = format!("{q} site:{d}"),
+        many => {
+            let any = many
+                .iter()
+                .map(|d| format!("site:{d}"))
+                .collect::<Vec<_>>()
+                .join(" OR ");
+            q = format!("{q} ({any})");
+        }
+    }
+    for d in &opts.exclude_domains {
+        q = format!("{q} -site:{d}");
+    }
+    q
+}
+
 pub fn date_days_ago(days: u64) -> String {
     crate::dates::epoch_days_to_date(crate::dates::today_epoch_days().saturating_sub(days))
 }
@@ -222,6 +245,32 @@ pub fn build_providers(ctx: &Arc<AppContext>) -> Vec<Box<dyn Provider>> {
         Box::new(serpapi::SerpApi::new(ctx.clone())),
         Box::new(xai::Xai::new(ctx.clone())),
     ]
+}
+
+#[cfg(test)]
+mod site_operator_tests {
+    use super::*;
+
+    fn opts(inc: &[&str], exc: &[&str]) -> SearchOpts {
+        SearchOpts {
+            include_domains: inc.iter().map(|s| s.to_string()).collect(),
+            exclude_domains: exc.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn several_include_domains_are_or_ed() {
+        assert_eq!(with_site_operators("q", &opts(&[], &[])), "q");
+        assert_eq!(
+            with_site_operators("q", &opts(&["a.com"], &[])),
+            "q site:a.com"
+        );
+        assert_eq!(
+            with_site_operators("q", &opts(&["a.com", "b.com"], &["c.com"])),
+            "q (site:a.com OR site:b.com) -site:c.com"
+        );
+    }
 }
 
 #[cfg(test)]

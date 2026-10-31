@@ -84,13 +84,7 @@ impl SerpApi {
 }
 
 fn augment_query(query: &str, opts: &SearchOpts, news: bool) -> String {
-    let mut q = query.to_string();
-    for d in &opts.include_domains {
-        q = format!("{q} site:{d}");
-    }
-    for d in &opts.exclude_domains {
-        q = format!("{q} -site:{d}");
-    }
+    let mut q = super::with_site_operators(query, opts);
     if let Some(when) = opts
         .freshness
         .as_deref()

@@ -80,14 +80,7 @@ impl Serper {
 }
 
 fn augment_query(query: &str, opts: &SearchOpts) -> String {
-    let mut q = query.to_string();
-    for d in &opts.include_domains {
-        q = format!("{q} site:{d}");
-    }
-    for d in &opts.exclude_domains {
-        q = format!("{q} -site:{d}");
-    }
-    q
+    super::with_site_operators(query, opts)
 }
 
 fn parse_organic(body: &serde_json::Value, source: &str) -> Vec<SearchResult> {
