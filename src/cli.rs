@@ -40,10 +40,6 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
 
-    /// Search query (shorthand for `search -q`)
-    #[arg(trailing_var_arg = true, global = false)]
-    pub query_words: Vec<String>,
-
     /// Output as JSON (auto-enabled when piped)
     #[arg(long, global = true)]
     pub json: bool,
@@ -169,9 +165,14 @@ pub struct VerifyArgs {
 
 #[derive(Parser)]
 pub struct SearchArgs {
-    /// Search query
-    #[arg(short, long)]
+    /// Search query (or give it as bare words: `search search rust tokio`)
+    #[arg(short, long, default_value = "")]
     pub query: String,
+
+    /// Query words; joined with spaces and appended to --query. Options may
+    /// come before or after them. A word starting with '-' needs `--` first.
+    #[arg(value_name = "QUERY")]
+    pub words: Vec<String>,
 
     /// Search mode (default: general). Choose explicitly: general, news,
     /// academic, deep, social, scholar, patents, people, places, images,

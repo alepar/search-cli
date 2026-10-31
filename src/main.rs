@@ -27,16 +27,11 @@ use tokio::net::lookup_host;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-/// Global flags read straight from argv. Needed because `query_words` uses
-/// `trailing_var_arg`, which otherwise swallows flags placed AFTER a bare query
-/// (`search foo --json` — clap never sees the `--json`), and because the
-/// help/version/parse-error paths run before clap has populated `Cli`.
+/// Global flags read straight from argv: tracing starts, and the
+/// help/version/parse-error paths render, before clap has populated `Cli`.
 #[derive(Default, Clone, Copy)]
 struct GlobalFlags {
     json: bool,
-    quiet: bool,
-    last: bool,
-    x_only: bool,
     debug: bool,
 }
 
@@ -49,9 +44,6 @@ fn scan_global_flags() -> GlobalFlags {
         }
         match arg.to_str() {
             Some("--json") => f.json = true,
-            Some("--quiet") => f.quiet = true,
-            Some("--last") => f.last = true,
-            Some("--x") => f.x_only = true,
             Some("--debug") | Some("--verbose") => f.debug = true,
             _ => {}
         }
@@ -59,9 +51,51 @@ fn scan_global_flags() -> GlobalFlags {
     f
 }
 
-/// Global-flag tokens to strip from a bare query that `trailing_var_arg`
-/// captured, so `search foo --json` searches "foo", not "foo --json".
+/// Global flags, which may appear anywhere, including before a subcommand.
 const GLOBAL_FLAG_TOKENS: &[&str] = &["--json", "--quiet", "--last", "--x", "--debug", "--verbose"];
+
+/// Expand the bare-query shorthand into the `search` subcommand, so search
+/// options work on either side of the query: `search "q" -p tavily -c 2` and
+/// `search -p tavily "q"` both become `search search ...`. The first token
+/// that is not a global flag decides: a subcommand name or a top-level
+/// help/version flag leaves argv untouched; anything else (query words, -q,
+/// -p, -m, ...) is a search.
+fn expand_bare_query(
+    argv: Vec<std::ffi::OsString>,
+    subcommands: &[String],
+) -> Vec<std::ffi::OsString> {
+    let first = argv
+        .iter()
+        .skip(1)
+        .find(|a| !GLOBAL_FLAG_TOKENS.iter().any(|g| a.as_os_str() == *g));
+    let Some(first) = first else {
+        return argv;
+    };
+    let keep = match first.to_str() {
+        Some("-h" | "--help" | "-V" | "--version") => true,
+        Some(t) => subcommands.iter().any(|s| s == t),
+        None => false,
+    };
+    if keep {
+        return argv;
+    }
+    let mut out = argv;
+    out.insert(1, "search".into());
+    out
+}
+
+/// Names and aliases of every subcommand, plus clap's implicit `help`.
+fn subcommand_names() -> Vec<String> {
+    use clap::CommandFactory;
+    let cmd = Cli::command();
+    let mut names: Vec<String> = cmd
+        .get_subcommands()
+        .flat_map(|c| std::iter::once(c.get_name()).chain(c.get_all_aliases()))
+        .map(String::from)
+        .collect();
+    names.push("help".into());
+    names
+}
 
 /// Initialize tracing to stderr so provider/engine diagnostics are never silently
 /// dropped. Honors `RUST_LOG`; `--debug` raises the default level to `debug`.
@@ -105,14 +139,15 @@ async fn main() {
     // 2. Start loading config in parallel with CLI parsing
     let config_handle = tokio::task::spawn_blocking(load_config);
 
-    // 3. Pre-scan global flags before clap parses (covers flags trailing a bare
-    //    query, plus the help/version/error paths). Init tracing immediately.
+    // 3. Pre-scan global flags before clap parses (for the help/version/error
+    //    paths). Init tracing immediately.
     let flags = scan_global_flags();
     init_tracing(flags.debug);
     let json_flag = flags.json;
 
     // 4. CLI Parsing — use try_parse so we own error handling
-    let mut cli = match Cli::try_parse() {
+    let argv = expand_bare_query(std::env::args_os().collect(), &subcommand_names());
+    let cli = match Cli::try_parse_from(argv) {
         Ok(cli) => cli,
         Err(e) => {
             if matches!(
@@ -147,13 +182,6 @@ async fn main() {
             std::process::exit(err.exit_code());
         }
     };
-
-    // Merge pre-scanned flags so flags trailing a bare query still take effect.
-    cli.json |= flags.json;
-    cli.quiet |= flags.quiet;
-    cli.last |= flags.last;
-    cli.x_only |= flags.x_only;
-    cli.debug |= flags.debug;
 
     let ctx = Ctx::new(cli.json, cli.quiet);
 
@@ -245,6 +273,7 @@ fn apply_max_chars(response: &mut types::SearchResponse, max_chars: Option<usize
 fn default_search_args(query: String) -> cli::SearchArgs {
     cli::SearchArgs {
         query,
+        words: Vec::new(),
         mode: types::Mode::General,
         count: None,
         providers: None,
@@ -265,17 +294,6 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
         cmd
     } else if cli.last {
         Commands::Search(default_search_args(String::new()))
-    } else if !cli.query_words.is_empty() {
-        // Drop any global-flag tokens trailing_var_arg swallowed into the query
-        // (their effect was already applied via the pre-scan merge in main).
-        let query = cli
-            .query_words
-            .iter()
-            .filter(|w| !GLOBAL_FLAG_TOKENS.contains(&w.as_str()))
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(" ");
-        Commands::Search(default_search_args(query))
     } else {
         use clap::CommandFactory;
         if ctx.is_json() {
@@ -296,6 +314,14 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
 
     match command {
         Commands::Search(mut args) => {
+            if !args.words.is_empty() {
+                let words = std::mem::take(&mut args.words).join(" ");
+                args.query = if args.query.is_empty() {
+                    words
+                } else {
+                    format!("{} {words}", args.query)
+                };
+            }
             // --x flag: force X/Twitter search via xAI Grok
             if cli.x_only {
                 args.mode = types::Mode::Social;
@@ -1197,6 +1223,73 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                     }
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    /// Parse argv the way main() does and return the search args.
+    fn parse_search(argv: &[&str]) -> cli::SearchArgs {
+        let argv = std::iter::once("search").chain(argv.iter().copied());
+        let argv = expand_bare_query(argv.map(Into::into).collect(), &subcommand_names());
+        match Cli::try_parse_from(argv).unwrap().command {
+            Some(Commands::Search(args)) => args,
+            _ => panic!("not a search command"),
+        }
+    }
+
+    #[test]
+    fn options_after_bare_query() {
+        let a = parse_search(&["rust tokio runtime", "-p", "tavily", "-c", "2"]);
+        assert_eq!(a.words, ["rust tokio runtime"]);
+        assert_eq!(a.providers.as_deref(), Some(&["tavily".to_string()][..]));
+        assert_eq!(a.count, Some(2));
+    }
+
+    #[test]
+    fn options_before_bare_query() {
+        let a = parse_search(&["-p", "tavily", "-m", "news", "rust", "tokio"]);
+        assert_eq!(a.words, ["rust", "tokio"]);
+        assert_eq!(a.providers.as_deref(), Some(&["tavily".to_string()][..]));
+        assert!(matches!(a.mode, types::Mode::News));
+    }
+
+    #[test]
+    fn global_flags_around_bare_query() {
+        let argv = ["search", "--json", "rust", "--quiet"].map(std::ffi::OsString::from);
+        let cli =
+            Cli::try_parse_from(expand_bare_query(argv.to_vec(), &subcommand_names())).unwrap();
+        assert!(cli.json && cli.quiet);
+        assert!(matches!(cli.command, Some(Commands::Search(ref a)) if a.words == ["rust"]));
+    }
+
+    #[test]
+    fn explicit_subcommand_and_dashed_words() {
+        let a = parse_search(&["search", "rust", "-p", "brave"]);
+        assert_eq!(a.words, ["rust"]);
+        let a = parse_search(&["-q", "rust", "--", "-tokio"]);
+        assert_eq!(
+            (a.query.as_str(), &a.words[..]),
+            ("rust", &["-tokio".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn subcommands_help_and_last_are_not_rewritten() {
+        let names = subcommand_names();
+        for argv in [
+            &["search", "config", "check"][..],
+            &["search", "--help"],
+            &["search", "-V"],
+            &["search", "--last", "--json"],
+            &["search", "help"],
+        ] {
+            let argv: Vec<std::ffi::OsString> = argv.iter().map(Into::into).collect();
+            assert_eq!(expand_bare_query(argv.clone(), &names), argv);
         }
     }
 }

@@ -59,6 +59,12 @@
 - Browserless: `/content` runs with `stealth=true` and `bestAttempt`, so the
   rung uses Browserless's bot-detection mode and returns partial renders
   instead of failing on a selector timeout.
+- The bare-query shorthand accepts search options on either side of the
+  query: `search "rust tokio" -p tavily -c 2` and `search -p tavily "rust
+  tokio"` now both search "rust tokio" with Tavily. Before, trailing options
+  were searched as literal text and leading ones were rejected. `search search`
+  also takes the query as bare words; a word starting with `-` needs `--`
+  first.
 
 ## 0.10.0 — 2026-10-31
 
