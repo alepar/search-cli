@@ -238,7 +238,9 @@ search usage --json
 
 Reports remaining credits/quota for every provider whose API exposes it:
 **SerpApi** (`account.json`), **Firecrawl** (credit-usage endpoint),
-**Tavily** (usage endpoint), **Linkup** (credits balance endpoint), **xAI**
+**Tavily** (usage endpoint), **Linkup** (credits balance endpoint), **Serper**
+(account endpoint), **Jina** (token wallet, read from Jina's API-dashboard
+backend, which is not part of its public docs), **xAI**
 (management API — set `XAI_MANAGEMENT_API_KEY` + `XAI_TEAM_ID`), and **Brave**
 (rate-limit headers; the check consumes one metered request). The rest are dashboard-only and
 reported as `supported: false` (Kagi API v1 exposes no balance at all). Purely informational: the
@@ -246,6 +248,28 @@ CLI never disables or deprioritizes a provider because its balance is low —
 if a provider is out of credits, the failed call shows up as a
 `billing_quota` entry in `metadata.provider_failures` and you decide what to
 top up.
+
+### Monthly Billing
+
+```bash
+search billing           # table: providers x last 6 months, newest left
+search billing --json    # same data, every cell tagged with its source
+```
+
+One row per provider, one column per UTC calendar month (last six, newest
+first). Values stay in each provider's own unit; nothing is converted to
+dollars. Each cell says where its number came from:
+
+| Cell | Source | Providers |
+|---|---|---|
+| `197M` | provider usage history (`api`) | **Jina** (tokens), **Firecrawl** (credits), **xAI** (USD; needs `XAI_MANAGEMENT_API_KEY` + `XAI_TEAM_ID`) |
+| `7,030*` | current billing cycle only (`api_current_period`), current month column | **Tavily** (credits), **SerpApi** (searches) |
+| `~$0.18` | estimate from local search logs (`estimate`, USD, `search stats` price table) | everyone else, and earlier months of Tavily/SerpApi |
+| `-` | no data (`none`): month predates the oldest local search log | |
+
+If a provider's usage API fails, its row falls back to estimates and the
+error is listed under the table (`error` in JSON). Exa's usage history needs
+a separate team service key, so Exa stays on estimates.
 
 ### Health Check
 

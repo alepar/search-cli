@@ -33,6 +33,7 @@ Quick examples:
 - `search --x "AI agents"` — X/Twitter only
 - `search verify alice@stripe.com --json` — SMTP email verification (probes real mail servers; use sparingly)
 - `search usage --json` — remaining credits per provider (where the API exposes it)
+- `search billing --json` — monthly usage per provider, last 6 months (provider history where available, else local-log estimates; each cell tagged with its source)
 - `search doctor --json` — test-fire every configured provider (health preflight; one billed call each)
 - `search stats --json` — local analytics: spend, modes, provider quality, cache hits
 

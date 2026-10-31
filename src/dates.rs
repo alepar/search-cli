@@ -25,9 +25,34 @@ pub fn epoch_days_to_date(days: u64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
+/// Days since 1970-01-01 for a UTC civil date; the inverse of
+/// `epoch_days_to_date` (Hinnant's days-from-civil).
+pub fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u64;
+    let mp = u64::from((m + 9) % 12);
+    let doy = (153 * mp + 2) / 5 + u64::from(d) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe as i64 - 719_468
+}
+
 #[cfg(test)]
 mod tests {
-    use super::epoch_days_to_date;
+    use super::{days_from_civil, epoch_days_to_date};
+
+    #[test]
+    fn days_from_civil_inverts_epoch_days_to_date() {
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        assert_eq!(days_from_civil(2024, 2, 29), 19_782);
+        assert_eq!(days_from_civil(2026, 10, 31), 20_757);
+        for d in [0u64, 10_956, 19_723, 19_783, 20_757] {
+            let s = epoch_days_to_date(d);
+            let (y, m, dd) = (&s[0..4], &s[5..7], &s[8..10]);
+            let back = days_from_civil(y.parse().unwrap(), m.parse().unwrap(), dd.parse().unwrap());
+            assert_eq!(back, d as i64);
+        }
+    }
 
     #[test]
     fn known_dates() {

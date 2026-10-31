@@ -111,6 +111,10 @@ pub enum Commands {
     /// Show remaining credits/quota for providers that expose a usage API
     Usage,
 
+    /// Monthly usage per provider for the last 6 months, newest first
+    /// (provider usage history where the API has it, else local-log estimates)
+    Billing,
+
     /// Test-fire every configured provider with a minimal query and report
     /// health, latency, and failure causes (each check is one billed request)
     Doctor,
