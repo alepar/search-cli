@@ -313,6 +313,12 @@ export SEARCH_KEYS_BRAVE=your-key
 
 Precedence (highest first): `<PROVIDER>_API_KEY` env → `SEARCH_KEYS_*` env → config file.
 
+xAI's model is configurable because xAI retires model slugs on a schedule.
+The default is `grok-4.3`; override it with `search config set xai.model <id>`
+or `SEARCH_XAI_MODEL`. In `social` mode, `-d` restricts results to the given X
+handles and `--exclude-domain` drops them (without `@`, at most 20 each). xAI
+accepts only one of the two lists per request, so `-d` wins if both are given.
+
 ## Signing in to metasearch.sh
 
 [metasearch.sh](https://metasearch.sh) is the hosted sibling: one prepaid

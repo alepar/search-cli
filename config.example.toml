@@ -18,3 +18,6 @@ xai = ""
 [settings]
 timeout = 10
 count = 10
+
+# [xai]
+# model = "grok-4.3"   # model for X search; default grok-4.3 (SEARCH_XAI_MODEL)

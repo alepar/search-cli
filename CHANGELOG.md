@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- xAI: the default model moves from `grok-4-1-fast` (retired 2026-05-15; xAI
+  now redirects it to `grok-4.3` at grok-4.3 prices) to `grok-4.3`
+  explicitly. The model is configurable via a new `[xai]` section
+  (`search config set xai.model <id>` or `SEARCH_XAI_MODEL`) so the next
+  retirement doesn't need a release; `search config show` displays it.
+- xAI: `-d`/`--exclude-domain` (X handles in `social` mode) are no longer sent
+  together — x_search rejects requests that set both `allowed_x_handles` and
+  `excluded_x_handles`. `-d` wins. Each list is stripped of `@`,
+  deduplicated, and capped at the API maximum of 20.
+- xAI: `-f` date windows now include today. x_search treats `to_date` as
+  exclusive, so `-f day` previously returned only yesterday's posts.
+- `search stats` estimates $0.08 per xAI call (grok-4.3 tokens plus X Search
+  at $5 per 1,000 posts fetched), up from $0.05.
+
 ## 0.10.0 — 2026-10-31
 
 First release from the alepar/search-cli fork (based on upstream 0.9.0).
