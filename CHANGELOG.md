@@ -52,6 +52,10 @@
 - Extract/scrape: the Jina Reader rung runs without a Jina key (r.jina.ai
   serves keyless requests at a lower rate limit), so URL extraction works with
   no provider configured. A configured key is still sent.
+- Parallel: moved from `/v1beta/search` to the GA `/v1/search`. Result count,
+  excerpt size, location (now lowercase ISO alpha-2) and source policy go under
+  `advanced_settings`, as v1 requires; results now carry `publish_date`.
+  `search stats` estimates $0.001 per call (fast mode), down from $0.005.
 
 ## 0.10.0 — 2026-10-31
 

@@ -16,7 +16,8 @@ fn estimated_cost_per_call(provider: &str) -> f64 {
         "jina" => 0.0005,
         "firecrawl" => 0.002,
         "brave" => 0.005,
-        "parallel" => 0.005,
+        // Search API `fast` mode: $1 per 1,000 requests (docs, 2026-10).
+        "parallel" => 0.001,
         "linkup" => 0.0055,
         "kagi" => 0.012,
         "exa" => 0.007,
