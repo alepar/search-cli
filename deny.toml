@@ -4,14 +4,7 @@
 
 [advisories]
 yanked = "deny"
-ignore = [
-    # indicatif -> number_prefix: unmaintained formatting helper, no upgrade
-    # published; cosmetic dependency (spinner), not on any network path.
-    "RUSTSEC-2025-0119",
-    # rustls-pemfile: unmaintained but frozen-format PEM parser; pulled in
-    # transitively, no patched alternative exposed by the parents yet.
-    "RUSTSEC-2025-0134",
-]
+ignore = []
 
 [licenses]
 allow = [
@@ -24,7 +17,6 @@ allow = [
     "MPL-2.0",
     "Zlib",
     "Unicode-3.0",
-    "OpenSSL",
     "CDLA-Permissive-2.0",
     # wreq-util (stealth browser emulation profiles) — LGPL is acceptable for
     # this standalone binary; revisit if the crate is ever vendored/modified.

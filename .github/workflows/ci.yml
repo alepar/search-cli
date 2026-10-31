@@ -4,6 +4,11 @@ on:
   push:
     branches: [master]
   pull_request:
+  workflow_dispatch:
+  # Weekly: catches new RustSec advisories and new stable-toolchain lints
+  # between pushes.
+  schedule:
+    - cron: "17 6 * * 1"
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,7 +19,7 @@ jobs:
     # Linux CI. Keeps the gate on the same platform we ship.
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -37,22 +42,37 @@ jobs:
   linux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Clippy (no stealth)
+        run: cargo clippy --all-targets --locked --no-default-features -- -D warnings
+
       - name: Test (no stealth)
         run: cargo test --locked --no-default-features
+
+  # Oldest supported toolchain, from rust-version in Cargo.toml.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.89
+      - uses: Swatinem/rust-cache@v2
+      - name: Check (no stealth)
+        run: cargo check --all-targets --locked --no-default-features
 
   # Advisory + license + source gate. wreq is a pre-release pin inherited
   # from the yanked rquest crate — exactly the dependency class to watch.
   deny:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories licenses sources
