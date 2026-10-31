@@ -5,6 +5,7 @@
 //! reported as `supported: false` so their absence is explicit, not silent.
 
 use crate::context::AppContext;
+use crate::errors::redact_secrets;
 use crate::providers;
 use serde::Serialize;
 use std::sync::Arc;
@@ -42,6 +43,11 @@ fn unsupported(name: &str, configured: bool) -> ProviderUsage {
     }
 }
 
+/// reqwest's Display echoes the request URL, and SerpApi's carries the key.
+fn transport_error(e: reqwest::Error) -> String {
+    redact_secrets(&e.to_string())
+}
+
 async fn get_json(
     ctx: &AppContext,
     url: &str,
@@ -55,17 +61,17 @@ async fn get_json(
     if let Some((k, v)) = header {
         req = req.header(k, v);
     }
-    let resp = req.send().await.map_err(|e| e.to_string())?;
+    let resp = req.send().await.map_err(transport_error)?;
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
         let excerpt: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
         let excerpt: String = excerpt.chars().take(160).collect();
-        return Err(format!("HTTP {status}: {excerpt}"));
+        return Err(redact_secrets(&format!("HTTP {status}: {excerpt}")));
     }
     resp.json::<serde_json::Value>()
         .await
-        .map_err(|e| e.to_string())
+        .map_err(transport_error)
 }
 
 /// SerpApi: GET https://serpapi.com/account.json?api_key=...
@@ -93,7 +99,7 @@ async fn brave_usage(ctx: &AppContext, key: String) -> Result<serde_json::Value,
         .header("Accept", "application/json")
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(transport_error)?;
     let remaining = resp
         .headers()
         .get("x-ratelimit-remaining")

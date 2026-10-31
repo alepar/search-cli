@@ -104,7 +104,7 @@ pub async fn run(ctx: Arc<AppContext>) -> Vec<Check> {
                     ok: false,
                     latency_ms: Some(latency),
                     results: None,
-                    category: Some(e.to_provider_failure(name).category.as_str().to_string()),
+                    category: Some(e.category().as_str().to_string()),
                     error: Some(truncate(&e.to_string(), 160)),
                 },
                 Err(_) => Check {

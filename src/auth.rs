@@ -83,13 +83,14 @@ pub fn resolve_base_url(config: &AppConfig) -> String {
     DEFAULT_BASE_URL.to_string()
 }
 
-/// Hosts `search login` will hand an API key to without an explicit override.
+/// Hosts the account key is sent to without an explicit override.
 const TRUSTED_LOGIN_HOSTS: &[&str] = &["metasearch.sh", "www.metasearch.sh"];
 
 /// Environment variable that consents to logging in against another host.
 const OVERRIDE_VAR: &str = "METASEARCH_ALLOW_INSECURE_HOST";
 
-/// Guard the host `search login` will send credentials to.
+/// Guard every host the account key is sent to: `login`, `whoami` and
+/// `logout --revoke` all attach it as a bearer token.
 ///
 /// The login flow ends with the server handing back an API key that can spend
 /// real money. An agent reading a poisoned web page can run
@@ -97,7 +98,7 @@ const OVERRIDE_VAR: &str = "METASEARCH_ALLOW_INSECURE_HOST";
 /// `--url` — and the next login delivers the key to whoever asked. Anything
 /// but the known hosts now needs deliberate consent, and plain http is
 /// refused outright: a bearer token must not cross the wire in clear.
-fn assert_login_host_allowed(base: &str) -> Result<(), SearchError> {
+fn assert_credential_host_allowed(base: &str) -> Result<(), SearchError> {
     let parsed = url::Url::parse(base)
         .map_err(|e| SearchError::Config(format!("'{base}' is not a valid URL: {e}")))?;
     let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
@@ -109,7 +110,7 @@ fn assert_login_host_allowed(base: &str) -> Result<(), SearchError> {
     let consented = std::env::var(OVERRIDE_VAR).is_ok_and(|v| v == "1" || v == "true");
     if !consented {
         return Err(SearchError::Config(format!(
-            "refusing to send credentials to '{base}'. `search login` only trusts \
+            "refusing to send credentials to '{base}'. search only trusts \
              https://metasearch.sh. If you are running your own instance, set \
              {OVERRIDE_VAR}=1 to confirm."
         )));
@@ -205,7 +206,7 @@ pub async fn login(
         Some(u) => u.trim_end_matches('/').to_string(),
         None => resolve_base_url(config),
     };
-    assert_login_host_allowed(&base)?;
+    assert_credential_host_allowed(&base)?;
 
     let start = client
         .post(format!("{base}/api/v1/device/code"))
@@ -394,12 +395,17 @@ pub async fn logout(
     let mut revoked = false;
     if revoke {
         let base = resolve_base_url(config);
-        let resp = client
-            .delete(format!("{base}/api/v1/me"))
-            .bearer_auth(&token)
-            .send()
-            .await;
-        revoked = matches!(resp, Ok(r) if r.status().is_success());
+        // An untrusted host gets no request; the key is still cleared below.
+        if let Err(e) = assert_credential_host_allowed(&base) {
+            tracing::warn!("not revoking: {e}");
+        } else {
+            let resp = client
+                .delete(format!("{base}/api/v1/me"))
+                .bearer_auth(&token)
+                .send()
+                .await;
+            revoked = matches!(resp, Ok(r) if r.status().is_success());
+        }
     }
 
     // Always clear locally, even when revocation failed — leaving a key the
@@ -445,6 +451,7 @@ pub async fn whoami(
     }
 
     let base = resolve_base_url(config);
+    assert_credential_host_allowed(&base)?;
     let resp = client
         .get(format!("{base}/api/v1/me"))
         .bearer_auth(&token)
@@ -516,13 +523,34 @@ mod tests {
 
     #[test]
     fn login_host_is_pinned_unless_consented() {
-        use super::assert_login_host_allowed;
+        use super::assert_credential_host_allowed;
         // The default host is fine.
-        assert!(assert_login_host_allowed("https://metasearch.sh").is_ok());
+        assert!(assert_credential_host_allowed("https://metasearch.sh").is_ok());
         // A prompt-injected agent redirecting the flow gets refused.
-        assert!(assert_login_host_allowed("https://evil.example").is_err());
+        assert!(assert_credential_host_allowed("https://evil.example").is_err());
         // So does plain http on the real host.
-        assert!(assert_login_host_allowed("http://metasearch.sh").is_err());
+        assert!(assert_credential_host_allowed("http://metasearch.sh").is_err());
+    }
+
+    #[tokio::test]
+    async fn whoami_refuses_untrusted_host_before_sending_the_key() {
+        if std::env::var("METASEARCH_URL").is_ok()
+            || std::env::var("METASEARCH_ALLOW_INSECURE_HOST").is_ok()
+        {
+            return;
+        }
+        let mut cfg = AppConfig::default();
+        cfg.metasearch.token = "ms_live_FAKE".to_string();
+        cfg.metasearch.url = "http://attacker.invalid".to_string();
+        let ctx = crate::output::Ctx::new(true, true);
+        let err = super::whoami(&cfg, &reqwest::Client::new(), &ctx)
+            .await
+            .unwrap_err();
+        // A Config refusal, not a transport error: no request was attempted.
+        assert!(
+            matches!(err, crate::errors::SearchError::Config(ref m) if m.contains("refusing")),
+            "{err}"
+        );
     }
 
     #[test]
