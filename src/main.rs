@@ -617,6 +617,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 None
             };
 
+            let started = std::time::Instant::now();
             let response =
                 engine::run(app, &args.query, args.mode, count, &args.providers, &opts).await;
 
@@ -624,6 +625,14 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 sp.finish_and_clear();
             }
 
+            if let Err(errors::SearchError::AllProvidersFailed { failed }) = &response {
+                logging::log_failed_search(
+                    &args.query,
+                    &mode_str,
+                    started.elapsed().as_millis(),
+                    failed,
+                );
+            }
             let mut response = response?;
 
             // Don't cache empty results — a transient no_results shouldn't be

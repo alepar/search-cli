@@ -1,4 +1,4 @@
-use crate::types::SearchResponse;
+use crate::types::{ProviderFailure, SearchResponse};
 use directories::ProjectDirs;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -35,22 +35,9 @@ fn log_path() -> PathBuf {
 /// write_all call: concurrent agent invocations append to the same file, and
 /// multi-write appends can interleave.
 pub fn log_search(response: &SearchResponse) {
-    if logging_disabled() {
-        return;
-    }
-    let path = log_path();
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
     let entry = serde_json::json!({
         "v": 1,
-        "ts": now,
+        "ts": now_secs(),
         "query": response.query,
         "mode": response.mode,
         "result_count": response.metadata.result_count,
@@ -60,19 +47,58 @@ pub fn log_search(response: &SearchResponse) {
         "providers_failed": response.metadata.providers_failed,
         "providers_cancelled": response.metadata.providers_cancelled,
         "provider_results": response.metadata.provider_results,
-        "failure_categories": response
-            .metadata
-            .provider_failures
-            .iter()
-            .map(|f| format!("{}:{}", f.provider, f.category.as_str()))
-            .collect::<Vec<_>>(),
+        "failure_categories": failure_categories(&response.metadata.provider_failures),
         "answers": response.answers.iter().map(|a| &a.provider).collect::<Vec<_>>(),
         "warnings": response.metadata.warnings.len(),
         "sources": response.results.iter().map(|r| &r.source).collect::<Vec<_>>(),
         "urls": response.results.iter().take(10).map(|r| &r.url).collect::<Vec<_>>(),
     });
+    append_search_entry(&entry);
+}
 
-    let mut line = serde_json::to_string(&entry).unwrap_or_default();
+/// Log a search where every provider failed. It returns an error rather
+/// than a response, but its calls were made (and billed), so `search stats`
+/// must see them. Same schema as [`log_search`], with no results.
+pub fn log_failed_search(query: &str, mode: &str, elapsed_ms: u128, failed: &[ProviderFailure]) {
+    let providers: Vec<&str> = failed.iter().map(|f| f.provider.as_str()).collect();
+    let entry = serde_json::json!({
+        "v": 1,
+        "ts": now_secs(),
+        "query": query,
+        "mode": mode,
+        "result_count": 0,
+        "elapsed_ms": elapsed_ms,
+        "cached": false,
+        "providers_queried": providers,
+        "providers_failed": providers,
+        "failure_categories": failure_categories(failed),
+    });
+    append_search_entry(&entry);
+}
+
+fn failure_categories(failed: &[ProviderFailure]) -> Vec<String> {
+    failed
+        .iter()
+        .map(|f| format!("{}:{}", f.provider, f.category.as_str()))
+        .collect()
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn append_search_entry(entry: &serde_json::Value) {
+    if logging_disabled() {
+        return;
+    }
+    let path = log_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let mut line = serde_json::to_string(entry).unwrap_or_default();
     line.push('\n');
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
         let _ = file.write_all(line.as_bytes());

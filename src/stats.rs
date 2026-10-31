@@ -83,7 +83,7 @@ fn now_secs() -> u64 {
 
 /// Every log line in the window, oldest first.
 pub(crate) fn read_entries(days: u64) -> (Vec<serde_json::Value>, u64) {
-    let cutoff = now_secs().saturating_sub(days * 86400);
+    let cutoff = now_secs().saturating_sub(days.saturating_mul(86400));
     let mut entries = Vec::new();
     let mut files = 0u64;
     let Ok(dir) = std::fs::read_dir(logging::log_dir()) else {
@@ -112,7 +112,15 @@ pub(crate) fn read_entries(days: u64) -> (Vec<serde_json::Value>, u64) {
 
 pub fn compute(days: u64) -> StatsReport {
     let (entries, log_files_read) = read_entries(days);
+    aggregate(&entries, days, log_files_read, read_balance_trends(days))
+}
 
+fn aggregate(
+    entries: &[serde_json::Value],
+    days: u64,
+    log_files_read: u64,
+    balances: BTreeMap<String, BalanceTrend>,
+) -> StatsReport {
     let mut searches = 0u64;
     let mut cache_hits = 0u64;
     let mut by_mode: BTreeMap<String, u64> = BTreeMap::new();
@@ -121,7 +129,7 @@ pub fn compute(days: u64) -> StatsReport {
     // url -> providers that returned it, for read-through attribution.
     let mut url_sources: HashMap<String, HashSet<String>> = HashMap::new();
 
-    for e in &entries {
+    for e in entries {
         searches += 1;
         let cached = e.get("cached").and_then(|c| c.as_bool()).unwrap_or(false);
         if cached {
@@ -173,15 +181,15 @@ pub fn compute(days: u64) -> StatsReport {
             }
         }
 
-        for url in str_array(e, "urls") {
-            let sources: HashSet<String> = str_array(e, "sources")
-                .iter()
-                .map(|s| base_provider(s).to_string())
-                .collect();
+        // `urls` is the first ten results and `sources` every result, in
+        // the same order, so index i pairs a URL with the provider that
+        // returned it.
+        let sources = str_array(e, "sources");
+        for (url, source) in str_array(e, "urls").iter().zip(&sources) {
             url_sources
-                .entry(normalize(&url))
+                .entry(normalize(url))
                 .or_default()
-                .extend(sources);
+                .insert(base_provider(source).to_string());
         }
     }
 
@@ -205,7 +213,7 @@ pub fn compute(days: u64) -> StatsReport {
         by_provider,
         estimated_total_spend_usd,
         top_queries,
-        balances: read_balance_trends(days),
+        balances,
         log_files_read,
     }
 }
@@ -228,7 +236,7 @@ fn normalize(url: &str) -> String {
 /// Latest balance per provider plus the delta across the window — actual
 /// burn, measured, not estimated. Fed by `search usage` snapshots.
 fn read_balance_trends(days: u64) -> BTreeMap<String, BalanceTrend> {
-    let cutoff = now_secs().saturating_sub(days * 86400);
+    let cutoff = now_secs().saturating_sub(days.saturating_mul(86400));
     let path = logging::log_dir().join("balances.jsonl");
     let Ok(content) = std::fs::read_to_string(path) else {
         return BTreeMap::new();
@@ -279,7 +287,7 @@ fn read_balance_trends(days: u64) -> BTreeMap<String, BalanceTrend> {
 
 /// Delete log files older than `days`. Returns files removed.
 pub fn prune_logs(days: u64) -> usize {
-    let cutoff = now_secs().saturating_sub(days * 86400);
+    let cutoff = now_secs().saturating_sub(days.saturating_mul(86400));
     let Ok(dir) = std::fs::read_dir(logging::log_dir()) else {
         return 0;
     };
@@ -353,4 +361,36 @@ pub fn render_human(r: &StatsReport) {
         }
     }
     println!();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn read_through_credits_only_the_provider_that_returned_the_url() {
+        let entries = vec![
+            json!({"ts": 1, "query": "q", "mode": "general",
+                   "providers_queried": ["brave", "exa"],
+                   "sources": ["brave", "exa"],
+                   "urls": ["https://b.test/", "https://e.test/"]}),
+            json!({"ts": 2, "query": "https://b.test", "mode": "extract",
+                   "providers_queried": ["jina"]}),
+        ];
+        let r = aggregate(&entries, 7, 1, BTreeMap::new());
+        assert_eq!(r.by_provider["brave"].result_read_through, 1);
+        assert_eq!(r.by_provider["exa"].result_read_through, 0);
+    }
+
+    #[test]
+    fn failed_search_counts_as_a_search_with_failures() {
+        let entries = vec![json!({"ts": 1, "query": "q", "mode": "general",
+            "result_count": 0, "providers_queried": ["serpapi"],
+            "providers_failed": ["serpapi"]})];
+        let r = aggregate(&entries, 7, 1, BTreeMap::new());
+        assert_eq!(r.searches, 1);
+        assert_eq!(r.by_provider["serpapi"].failures, 1);
+        assert_eq!(r.by_provider["serpapi"].calls, 1);
+    }
 }
