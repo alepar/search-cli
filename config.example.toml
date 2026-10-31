@@ -22,3 +22,11 @@ count = 10
 
 # [xai]
 # model = "grok-4.3"   # model for X search; default grok-4.3 (SEARCH_XAI_MODEL)
+
+# [reddit]
+# How extract reads a Reddit thread (SEARCH_REDDIT_READER):
+#   "index" - the search index's copy (Perplexity Search API); never contacts reddit.com
+#   "jina"  - the full live thread rendered by Jina Reader, falling back to the
+#             index copy. Opt-in: outside Reddit's terms for automated access.
+# Unset behaves like "index" and adds extra.reader_hint offering the opt-in.
+# reader = "index"

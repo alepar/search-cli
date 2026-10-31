@@ -7,6 +7,10 @@
 //! returns an answer with inline `[n]` citations plus a `search_results`
 //! output item holding the sources. Search filters live on the `web_search`
 //! tool.
+//!
+//! [`Perplexity::search_index`] calls the separate Search API (`POST
+//! /search`), which returns raw ranked pages with page excerpts and no model
+//! run.
 
 use crate::context::AppContext;
 use crate::errors::SearchError;
@@ -19,6 +23,9 @@ use std::time::Duration;
 
 const ENDPOINT: &str = "https://api.perplexity.ai/v1/agent";
 const EFFORT: &str = "fast";
+const INDEX_ENDPOINT: &str = "https://api.perplexity.ai/search";
+/// Source label (and metadata name) for Search API results.
+pub const INDEX_SOURCE: &str = "perplexity_search";
 /// `search_domain_filter` accepts at most 20 entries.
 const MAX_DOMAINS: usize = 20;
 
@@ -74,6 +81,40 @@ impl Perplexity {
 
         map_results(resp)
     }
+
+    /// Perplexity Search API (`POST /search`): ranked pages from Perplexity's
+    /// own index, each with query-relevant page text of up to
+    /// `max_tokens_per_page`. No model runs, so snippets are page text rather
+    /// than a synthesis. This is how the reddit mode and the reddit.com
+    /// extract route read Reddit without requesting reddit.com.
+    pub async fn search_index(
+        &self,
+        query: &str,
+        max_results: usize,
+        opts: &SearchOpts,
+        max_tokens_per_page: u32,
+    ) -> Result<Vec<SearchResult>, SearchError> {
+        let key = self.api_key();
+        if key.is_empty() {
+            return Err(SearchError::AuthMissing {
+                provider: "perplexity",
+            });
+        }
+        let body = build_index_request(query, max_results, opts, max_tokens_per_page);
+        let client = &self.ctx.client;
+        let resp = super::retry_request(|| async {
+            let r = client
+                .post(INDEX_ENDPOINT)
+                .header("Authorization", format!("Bearer {key}"))
+                .json(&body)
+                .send()
+                .await?;
+            let r = super::ok_or_api_error(r, "perplexity").await?;
+            Ok(r.json::<IndexResponse>().await?)
+        })
+        .await?;
+        Ok(map_index_results(resp))
+    }
 }
 
 /// Build the Agent API request. The `web_search` tool is only sent when a
@@ -88,21 +129,9 @@ fn build_request(query: &str, opts: &SearchOpts, recency: Option<&str>) -> Value
 
     let mut filters = serde_json::Map::new();
 
-    // Allowlist or denylist, never both in one request. An allowlist already
-    // excludes everything else, so it wins when both are given.
-    let domains: Vec<String> = if !opts.include_domains.is_empty() {
-        opts.include_domains.clone()
-    } else {
-        opts.exclude_domains
-            .iter()
-            .map(|d| format!("-{d}"))
-            .collect()
-    };
+    let domains = domain_filter(opts);
     if !domains.is_empty() {
-        filters.insert(
-            "search_domain_filter".into(),
-            json!(domains.into_iter().take(MAX_DOMAINS).collect::<Vec<_>>()),
-        );
+        filters.insert("search_domain_filter".into(), json!(domains));
     }
 
     // Explicit recency first (news default), then the CLI's -f word, which
@@ -127,6 +156,82 @@ fn build_request(query: &str, opts: &SearchOpts, recency: Option<&str>) -> Value
         body["tools"] = json!([tool]);
     }
     body
+}
+
+/// `search_domain_filter` entries: an allowlist, or a denylist of `-domain`
+/// entries, never both in one request. An allowlist already excludes
+/// everything else, so it wins when both are given.
+fn domain_filter(opts: &SearchOpts) -> Vec<String> {
+    let domains: Vec<String> = if !opts.include_domains.is_empty() {
+        opts.include_domains.clone()
+    } else {
+        opts.exclude_domains
+            .iter()
+            .map(|d| format!("-{d}"))
+            .collect()
+    };
+    domains.into_iter().take(MAX_DOMAINS).collect()
+}
+
+/// Search API request body. `max_results` is clamped to the API's 1..=20.
+fn build_index_request(
+    query: &str,
+    max_results: usize,
+    opts: &SearchOpts,
+    max_tokens_per_page: u32,
+) -> Value {
+    let mut body = json!({
+        "query": query,
+        "max_results": max_results.clamp(1, 20),
+        "max_tokens_per_page": max_tokens_per_page,
+    });
+    let domains = domain_filter(opts);
+    if !domains.is_empty() {
+        body["search_domain_filter"] = json!(domains);
+    }
+    if let Some(r) = opts.freshness.as_deref() {
+        body["search_recency_filter"] = json!(r);
+    }
+    if let Some(c) = opts.country.as_deref().filter(|c| !c.is_empty()) {
+        body["country"] = json!(c.to_ascii_uppercase());
+    }
+    body
+}
+
+/// Search API results as web results. The snippet is the page excerpt;
+/// `last_updated` (when Perplexity last indexed the page) goes in `extra`.
+fn map_index_results(resp: IndexResponse) -> Vec<SearchResult> {
+    resp.results
+        .into_iter()
+        .filter(|r| !r.url.is_empty())
+        .map(|r| SearchResult {
+            title: r.title,
+            url: r.url,
+            snippet: r.snippet,
+            source: INDEX_SOURCE.to_string(),
+            published: r.date,
+            image_url: None,
+            extra: r.last_updated.map(|d| json!({ "index_last_updated": d })),
+        })
+        .collect()
+}
+
+#[derive(Deserialize)]
+struct IndexResponse {
+    #[serde(default)]
+    results: Vec<IndexResult>,
+}
+
+#[derive(Deserialize)]
+struct IndexResult {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    snippet: String,
+    date: Option<String>,
+    last_updated: Option<String>,
 }
 
 /// Turn an Agent API response into one answer pseudo-result followed by the
@@ -441,5 +546,52 @@ mod tests {
             body["tools"][0]["filters"]["search_recency_filter"],
             json!("day")
         );
+    }
+
+    #[test]
+    fn index_request_carries_filters_and_clamps_count() {
+        let o = SearchOpts {
+            include_domains: vec!["reddit.com".into()],
+            freshness: Some("week".into()),
+            country: Some("gb".into()),
+            ..Default::default()
+        };
+        let body = build_index_request("tokio vs smol", 50, &o, 2048);
+        assert_eq!(body["query"], json!("tokio vs smol"));
+        assert_eq!(body["max_results"], json!(20));
+        assert_eq!(body["max_tokens_per_page"], json!(2048));
+        assert_eq!(body["search_domain_filter"], json!(["reddit.com"]));
+        assert_eq!(body["search_recency_filter"], json!("week"));
+        assert_eq!(body["country"], json!("GB"));
+        let bare = build_index_request("q", 0, &SearchOpts::default(), 512);
+        assert_eq!(bare["max_results"], json!(1));
+        assert!(bare.get("search_domain_filter").is_none());
+        assert!(bare.get("search_recency_filter").is_none());
+    }
+
+    // Shape recorded from a live /search call (2026-10-31), trimmed.
+    #[test]
+    fn index_results_map_excerpt_and_dates() {
+        let resp: IndexResponse = serde_json::from_str(
+            r#"{"id": "x", "results": [
+                {"title": "PSA: async-std has been officially discontinued",
+                 "url": "https://www.reddit.com/r/rust/comments/1jc6gis/psa/",
+                 "snippet": "PSA\n**votes: 452**\n### Comments\nUse smol.",
+                 "date": "2025-03-15", "last_updated": "2025-11-03"},
+                {"title": "no url", "url": "", "snippet": "dropped"},
+                {"title": "undated", "url": "https://a.example/", "snippet": "s"}
+            ]}"#,
+        )
+        .unwrap();
+        let results = map_index_results(resp);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].source, INDEX_SOURCE);
+        assert_eq!(results[0].published.as_deref(), Some("2025-03-15"));
+        assert!(results[0].snippet.contains("### Comments"));
+        assert_eq!(
+            results[0].extra,
+            Some(json!({"index_last_updated": "2025-11-03"}))
+        );
+        assert!(results[1].published.is_none() && results[1].extra.is_none());
     }
 }

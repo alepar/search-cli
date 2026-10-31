@@ -359,6 +359,106 @@ fn test_real_kagi_general_and_news() {
 }
 
 #[test]
+fn test_real_reddit_mode() {
+    if !has_provider("perplexity") {
+        eprintln!("SKIP: need perplexity");
+        return;
+    }
+    let output = search_cmd()
+        .args([
+            "search",
+            "-q",
+            "tokio vs smol",
+            "-m",
+            "reddit",
+            "-p",
+            "perplexity",
+            "--json",
+            "-c",
+            "5",
+            "--no-cache",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "reddit mode search failed");
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["mode"], "reddit");
+    let results = json["results"].as_array().unwrap();
+    assert!(!results.is_empty(), "reddit mode returned 0 results");
+    for r in results {
+        let url = r["url"].as_str().unwrap();
+        assert!(
+            url.starts_with("https://www.reddit.com/") && url.contains("/comments/"),
+            "not a canonical thread URL: {url}"
+        );
+        assert!(r["extra"]["post_id"].is_string());
+    }
+    eprintln!("  PASS reddit mode: {} threads", results.len());
+}
+
+#[test]
+fn test_real_reddit_extract() {
+    if !has_provider("perplexity") {
+        eprintln!("SKIP: need perplexity");
+        return;
+    }
+    let output = search_cmd()
+        .args([
+            "search",
+            "-q",
+            "https://old.reddit.com/r/rust/comments/1jc6gis/psa_asyncstd_has_been_officially_discontinued_use/",
+            "-m",
+            "extract",
+            "--json",
+            "--no-cache",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "reddit extract failed");
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        json["metadata"]["providers_queried"],
+        serde_json::json!(["reddit"])
+    );
+    let r = &json["results"][0];
+    assert_eq!(r["source"], "reddit");
+    assert_eq!(r["url"], "https://www.reddit.com/r/rust/comments/1jc6gis/");
+    assert_eq!(r["extra"]["copy"], "search_index");
+    assert!(r["snippet"].as_str().unwrap().len() > 200);
+    eprintln!(
+        "  PASS reddit extract: {} chars",
+        r["snippet"].as_str().unwrap().len()
+    );
+}
+
+/// A non-thread reddit.com URL fails with no_sanctioned_route and never
+/// reaches the scraper chain. Makes no network call.
+#[test]
+fn test_reddit_extract_non_thread_has_no_route() {
+    let output = search_cmd()
+        .args([
+            "search",
+            "-q",
+            "https://www.reddit.com/r/rust/",
+            "-m",
+            "extract",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    // Error envelopes go to stderr, after any log lines.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let start = stderr.find('{').expect("JSON error envelope on stderr");
+    let json: serde_json::Value = serde_json::from_str(&stderr[start..]).unwrap();
+    let failures = json["error"]["provider_failures"].as_array().unwrap();
+    assert_eq!(failures.len(), 1, "scraper chain ran: {failures:?}");
+    assert_eq!(failures[0]["provider"], "reddit");
+    assert_eq!(failures[0]["code"], "no_sanctioned_route");
+    assert_eq!(failures[0]["category"], "blocked");
+}
+
+#[test]
 fn test_real_domain_filter() {
     if !has_provider("exa") {
         eprintln!("SKIP: need exa for domain filter");

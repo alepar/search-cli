@@ -190,6 +190,14 @@ pub const MODES: &[ModeSpec] = &[
         description: "Live X/Twitter search via xAI Grok — an X summary plus cited posts",
         when_to_use: "What's being said on X, trending topics, account activity. Here -d/--exclude-domain filter X handles, not domains.",
     },
+    ModeSpec {
+        mode: Mode::Reddit,
+        input: InputKind::Query,
+        merge: MergeKind::Fused,
+        providers: &["perplexity", "serper", "kagi", "tavily", "brave"],
+        description: "Reddit threads, fused across search indexes scoped to reddit.com; one canonical URL per thread. Perplexity results carry indexed post and comment text. Never requests reddit.com",
+        when_to_use: "Community opinion, experience reports, troubleshooting threads. Read a thread with -m extract on its URL (an indexed copy; Reddit blocks direct fetches). -d/--exclude-domain do not apply.",
+    },
 ];
 
 pub fn spec(mode: Mode) -> &'static ModeSpec {
@@ -215,7 +223,7 @@ pub fn filter_support(provider: &str) -> FilterSupport {
     let base = provider.split("_llm_").next().unwrap_or(provider);
     match base {
         "brave" | "serper" | "serpapi" | "tavily" | "exa" | "perplexity" | "parallel"
-        | "linkup" | "kagi" => FilterSupport {
+        | "linkup" | "kagi" | "perplexity_search" => FilterSupport {
             freshness: true,
             domains: true,
             note: None,
@@ -275,6 +283,7 @@ mod tests {
             "browserless",
             "stealth",
             "xai",
+            "reddit",
         ];
         for spec in MODES {
             for p in spec.providers {

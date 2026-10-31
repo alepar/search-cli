@@ -25,6 +25,10 @@ const EARLY_STOP_GRACE: Duration = Duration::from_millis(1500);
 /// provider's top pick.
 const RRF_K: f64 = 60.0;
 
+/// Page text per Perplexity Search API result in reddit mode: enough for the
+/// post and a few comments without flooding a 10-result response.
+const REDDIT_TOKENS_PER_PAGE: u32 = 1024;
+
 pub async fn execute_search(
     ctx: Arc<AppContext>,
     query: &str,
@@ -35,6 +39,28 @@ pub async fn execute_search(
 ) -> Result<SearchResponse, SearchError> {
     let start = Instant::now();
     let query_arc: Arc<str> = Arc::from(query);
+
+    // Reddit mode searches reddit.com only, whatever -d/--exclude-domain said.
+    let reddit = mode == Mode::Reddit;
+    let mut warnings = Vec::new();
+    let scoped;
+    let opts = if reddit {
+        if !opts.include_domains.is_empty() || !opts.exclude_domains.is_empty() {
+            warnings.push(
+                "reddit mode searches reddit.com only; -d/--exclude-domain were ignored"
+                    .to_string(),
+            );
+        }
+        scoped = providers::reddit::scoped_opts(opts);
+        &scoped
+    } else {
+        opts
+    };
+    // In reddit mode Perplexity runs through its Search API (page text, no
+    // model) instead of the Agent API, so it is spawned separately below.
+    let pplx_index = reddit
+        && provider_allowed("perplexity", only_providers)
+        && providers::perplexity::Perplexity::new(ctx.clone()).is_configured();
 
     // Concrete mode in, concrete provider set out — no intent guessing, no
     // speculative pre-launch. The set is the mode's providers (or whatever -p
@@ -48,15 +74,30 @@ pub async fn execute_search(
             (in_mode_set || only_providers.is_some())
                 && provider_allowed(name, only_providers)
                 && p.is_configured()
+                && !(reddit && name == "perplexity")
         })
         .collect();
 
-    if active.is_empty() {
+    if active.is_empty() && !pplx_index {
         return Err(no_providers_error(mode, only_providers));
     }
 
     let mut set = JoinSet::new();
     let mut providers_queried = Vec::new();
+
+    if pplx_index {
+        let pplx = providers::perplexity::Perplexity::new(ctx.clone());
+        let (q, c, o) = (query_arc.clone(), count, opts.clone());
+        set.spawn(async move {
+            let result = timeout(
+                Duration::from_secs(15),
+                pplx.search_index(&q, c, &o, REDDIT_TOKENS_PER_PAGE),
+            )
+            .await;
+            (providers::perplexity::INDEX_SOURCE, result)
+        });
+        providers_queried.push(providers::perplexity::INDEX_SOURCE.to_string());
+    }
 
     // Deep mode also pulls Brave's LLM Context (grounding) API alongside Brave
     // web search — querying brave twice (web + grounding) is intentional.
@@ -123,6 +164,14 @@ pub async fn execute_search(
         };
         match join_result {
             Ok((name, Ok(Ok(items)))) => {
+                let items: Vec<SearchResult> = if reddit {
+                    items
+                        .into_iter()
+                        .filter_map(providers::reddit::to_thread_result)
+                        .collect()
+                } else {
+                    items
+                };
                 for item in &items {
                     unique_urls.insert(normalize_url(&item.url));
                 }
@@ -182,10 +231,16 @@ pub async fn execute_search(
         .cloned()
         .collect();
 
+    // Fusion keeps the first bucket's copy of a duplicate. In reddit mode
+    // that should be the Search API's page text (post and comments), not
+    // another engine's one-line snippet of the same thread.
+    if reddit {
+        buckets.sort_by_key(|(name, _)| name != providers::perplexity::INDEX_SOURCE);
+    }
     let mut all_results = fuse_rrf(buckets);
     all_results.truncate(count);
     let result_count = all_results.len();
-    let warnings = filter_warnings(&providers_queried, opts);
+    warnings.extend(filter_warnings(&providers_queried, opts));
     let elapsed = start.elapsed();
 
     // Total failure is an error, not a success-shaped envelope.

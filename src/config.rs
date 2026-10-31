@@ -17,6 +17,18 @@ pub struct AppConfig {
     pub metasearch: Metasearch,
     #[serde(default)]
     pub xai: XaiConfig,
+    #[serde(default)]
+    pub reddit: RedditConfig,
+}
+
+/// `[reddit]` section. `reader` picks how extract reads a Reddit thread:
+/// `index` (the search index's copy, the default behaviour) or `jina` (the
+/// full live thread rendered by Jina Reader, falling back to the index).
+/// Unset behaves like `index` but tells the caller the opt-in exists.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RedditConfig {
+    #[serde(default)]
+    pub reader: String,
 }
 
 /// `[xai]` section. xAI retires model slugs on a schedule, so the model is
@@ -118,6 +130,7 @@ impl Default for AppConfig {
             },
             metasearch: Metasearch::default(),
             xai: XaiConfig::default(),
+            reddit: RedditConfig::default(),
         }
     }
 }
@@ -188,6 +201,11 @@ pub const METASEARCH_KEYS: &[&str] = &["token", "email", "url"];
 
 /// Valid field names for `config set xai.<name>`.
 pub const XAI_KEYS: &[&str] = &["model"];
+
+/// Valid field names for `config set reddit.<name>`, and the values `reader`
+/// accepts.
+pub const REDDIT_KEYS: &[&str] = &["reader"];
+pub const REDDIT_READERS: &[&str] = &["index", "jina"];
 
 pub fn mask_key(key: &str) -> String {
     // Char-based: byte-slicing (`&key[..2]`) panics on multi-byte UTF-8 and
@@ -302,6 +320,19 @@ pub fn config_show(config: &AppConfig) {
     }
 
     println!();
+    let reader = match config.reddit.reader.trim() {
+        "" => "(not set: index)",
+        r => r,
+    };
+    if c {
+        println!("  {}", "[reddit]".bold());
+        println!("    {:<10} {}", "reader".white(), reader.cyan());
+    } else {
+        println!("[reddit]");
+        println!("  reader   = {reader}");
+    }
+
+    println!();
     let token = crate::auth::resolve_token(config);
     let host = crate::auth::resolve_base_url(config);
     if c {
@@ -385,9 +416,24 @@ pub fn config_set(key: &str, value: &str) -> Result<(), crate::errors::SearchErr
                     }
                     toml::Value::String(value.to_string())
                 }
+                "reddit" => {
+                    if !REDDIT_KEYS.contains(name) {
+                        return Err(SearchError::Config(format!(
+                            "Unknown field 'reddit.{name}'. Valid: {}",
+                            REDDIT_KEYS.join(", ")
+                        )));
+                    }
+                    if !REDDIT_READERS.contains(&value) {
+                        return Err(SearchError::Config(format!(
+                            "Invalid reddit.reader '{value}'. Valid: {}",
+                            REDDIT_READERS.join(", ")
+                        )));
+                    }
+                    toml::Value::String(value.to_string())
+                }
                 other => {
                     return Err(SearchError::Config(format!(
-                        "Unknown section '{other}'. Use 'keys.<provider>', 'settings.<name>', 'metasearch.<name>', or 'xai.<name>'."
+                        "Unknown section '{other}'. Use 'keys.<provider>', 'settings.<name>', 'metasearch.<name>', 'xai.<name>', or 'reddit.<name>'."
                     )));
                 }
             };

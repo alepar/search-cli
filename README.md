@@ -2,7 +2,7 @@
 
 # Search CLI — Web Search for AI Agents
 
-**One binary, 14 providers, 13 modes, rank-fused results. The web search tool your AI agent is missing.**
+**One binary, 14 providers, 14 modes, rank-fused results. The web search tool your AI agent is missing.**
 
 <br />
 
@@ -111,7 +111,7 @@ search "your query here"
 
 ## Features
 
-### 13 Search Modes
+### 14 Search Modes
 
 Pick a mode explicitly with `-m` (default is `general`). The `-q` column
 matters: `extract`/`scrape`/`similar` take a URL and reject text queries
@@ -127,12 +127,58 @@ same routing registry the engine uses.
 | `deep` | Max coverage; waits for all providers — use `-c 30` | query | Parallel + Brave (web + LLM Context) + Serper + Exa + Linkup + Kagi + Tavily + Perplexity + xAI |
 | `people` | A person, their role, LinkedIn profile | query | Exa |
 | `social` | What's being said on X/Twitter | query | xAI (Grok) |
+| `reddit` | Reddit threads: opinions, experience reports, troubleshooting | query | Perplexity (Search API) + Serper + Kagi + Tavily + Brave, scoped to reddit.com |
 | `patents` | Prior art, patent families | query | Serper |
 | `images` | Image search (check `image_url` fields) | query | Serper |
 | `places` | Local businesses, maps | query | Serper |
-| `extract` | Read one page as markdown, incl. JS/anti-bot | **URL** | Stealth (opt-in build) -> Jina -> Firecrawl -> Browserless |
+| `extract` | Read one page as markdown, incl. JS/anti-bot | **URL** | Stealth (opt-in build) -> Jina -> Firecrawl -> Browserless; reddit.com URLs: indexed copy only (see [Reddit](#reddit)) |
 | `scrape` | Alias of `extract` (identical) | **URL** | Stealth (opt-in build) -> Jina -> Firecrawl -> Browserless |
 | `similar` | "More like this page" | **URL** | Exa |
+
+### Reddit
+
+Reddit refuses honest automated clients: www.reddit.com serves an empty JS
+shell, `.json` and old.reddit answer a 403 block page, RSS ends on
+2026-11-13, and the Data API closed to new apps on 2026-10-31 (unregistered
+apps are cut off 2027-01-12, and everyone without a written agreement around
+March 2027). Since *Reddit v. SerpApi* (S.D.N.Y. 2026-07-31), evading its bot
+detection is a litigation risk. `search` therefore never requests reddit.com.
+Both Reddit paths read search indexes that already hold Reddit pages:
+
+- `-m reddit` fans the query out to Perplexity's Search API, Serper, Kagi,
+  Tavily and Brave, all scoped to reddit.com. It keeps thread URLs only and
+  rewrites each to one canonical URL (`https://www.reddit.com/r/<sub>/comments/<id>/`)
+  so the same thread fuses across engines. `extra` carries `post_id`,
+  `subreddit` and, for a comment permalink, `comment_id`. Perplexity results
+  carry indexed post and comment text (up to about 4 KB). Other engines
+  give a one-line snippet. `-d`/`--exclude-domain` do not apply. Exa is
+  not used because it no longer indexes reddit.com.
+- `-m extract` on a reddit.com or redd.it thread URL returns the thread's
+  indexed copy from the Perplexity Search API, found by post ID, with source
+  `reddit` and `extra.copy: "search_index"`, `extra.complete: false` and
+  `extra.index_last_updated`. It is query-relevant excerpts of the post and
+  comments, not the full live comment tree, and new threads appear only after
+  the index catches up. When no index holds the thread, or the URL is not a
+  thread (a subreddit, user page or share link), the result is an error with
+  category `blocked` and code `no_sanctioned_route`, and the generic scraper
+  chain does not run. `-p` without `reddit` skips this route.
+- Full live threads are an opt-in: `search config set reddit.reader jina`
+  (or `SEARCH_REDDIT_READER=jina`). Extract then asks Jina Reader to render the
+  thread (the post and every visible comment, collapsed replies excepted,
+  about 10-40 s), labelled `extra.copy: "live_render"`, and falls back to the
+  index copy if Jina fails or returns a wall (`extra.live_render_error` says
+  why). This is not a sanctioned route: Reddit's terms bar unauthorised
+  automated access, Jina's terms make the customer responsible for the
+  sources it reads, and Reddit can block Jina at any time. Every use logs a
+  warning. While `reddit.reader` is unset, index copies carry
+  `extra.reader_hint` offering the opt-in; `search config set reddit.reader
+  index` keeps index copies and removes the hint.
+
+Both need a Perplexity key; `-m reddit` also uses whichever of the other four
+engines are configured. Terms posture: these are ordinary calls to search
+APIs under their own terms. Serper resells Google results, and Perplexity is
+a defendant in *Reddit v. SerpApi*, so check whether that matters for your
+use.
 
 ### Rank Fusion, Not Fastest-Provider-First
 
@@ -196,6 +242,10 @@ search search -q "BRCA1 gene patent" -m patents
 
 # Search X (Twitter) only
 search --x "AI agents"
+
+# Reddit threads, then one thread's post and comments
+search search -q "tokio vs smol" -m reddit
+search search -q https://www.reddit.com/r/rust/comments/1jc6gis/ -m extract
 
 # URL modes take a URL, not a query
 search search -q https://example.com/article -m extract
