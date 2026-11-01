@@ -161,7 +161,10 @@ Both Reddit paths read search indexes that already hold Reddit pages:
   the index catches up. When no index holds the thread, or the URL is not a
   thread (a subreddit, user page or share link), the result is an error with
   category `blocked` and code `no_sanctioned_route`, and the generic scraper
-  chain does not run. `-p` without `reddit` skips this route.
+  chain does not run. An index copy that opens with a model's note (a
+  paraphrase, an apology, "unable to access") is rejected: the route tries the
+  index's other candidates, then fails with category `blocked` and code
+  `model_text`. `-p` without `reddit` skips this route.
 - Full live threads are an opt-in: `search config set reddit.reader jina`
   (or `SEARCH_REDDIT_READER=jina`). Extract then asks Jina Reader to render the
   thread (the post and every visible comment, collapsed replies excepted,

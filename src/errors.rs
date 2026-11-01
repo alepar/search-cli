@@ -1,6 +1,7 @@
 use crate::types::{
     ErrorDetail, ErrorResponse, FailureCategory, ProviderFailure, ENVELOPE_VERSION,
 };
+use crate::walls::Wall;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -252,6 +253,8 @@ fn suggestion_for_failures(failed: &[ProviderFailure]) -> String {
         .all(|f| matches!(f.category, Auth | BillingQuota | Config))
     {
         "Every provider failed on credentials/billing. Run `search config check` and verify your API keys have credit.".to_string()
+    } else if failed.iter().any(|f| f.code == Wall::ModelText.code()) {
+        "No provider returned the page's own text: see provider_failures. Open the URL in a browser, or use a different source.".to_string()
     } else if failed.iter().all(|f| matches!(f.category, Blocked | Parse)) {
         "The site served bot or login walls to every provider. Use a sanctioned route (an API, feed or archive copy), or open the URL in a browser.".to_string()
     } else if failed.iter().any(|f| f.retryable) {

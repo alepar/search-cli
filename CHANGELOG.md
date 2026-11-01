@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+Fixes:
+- Extract and scrape reject reader and index text that opens in a model's voice
+  (a paraphrase, an apology, an "unable to access" note) as a failed fetch with
+  category `blocked` and code `model_text`, so the chain moves to the next
+  route. Only the start of the body counts, so a page that quotes or discusses
+  a refusal still passes. First-party APIs are not checked.
+- A Reddit extract skips model-written index copies, and every other excerpt of
+  those pages, for the index's remaining candidates. It now always repeats the
+  lookup by title, one more Perplexity request for a URL with a slug, because a
+  model's note shows only in some excerpts. When every route fails, the error
+  keeps the live render's reason.
+
 ## 0.13.0 — 2026-11-01
 
 Features:

@@ -63,7 +63,11 @@ results), `-c N` (1-100 results).
   extract returns an indexed copy: `extra.copy: "search_index"`,
   `extra.complete: false` (excerpts, not the full comment tree). With no copy,
   or for a non-thread URL, it fails with `no_sanctioned_route`; the link is
-  the answer then. Do not retry it through other extract providers.
+  the answer then. Do not retry it through other extract providers. Extract
+  rejects reader or index text that opens with a model's note (a paraphrase,
+  an apology, "unable to access"); when no route has the page's own text it
+  fails with category `blocked` and code `model_text`, which is treated the
+  same way.
 - If a Reddit extract result carries `extra.reader_hint`, the user has not
   chosen how Reddit threads are read. When the full thread matters to the
   task, offer the opt-in once and proactively: full live threads via Jina

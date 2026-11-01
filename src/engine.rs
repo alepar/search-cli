@@ -589,9 +589,9 @@ pub async fn execute_special(
             if run_chain {
                 // Try Stealth (local) first, then Jina reader, Firecrawl, Browserless.
                 // After each attempt, walls (binary bytes, anti-bot challenges,
-                // login walls, empty JS shells) are demoted to a failure so the
-                // chain keeps escalating: a scraper "succeeding" with a login
-                // form must not stop the fallback.
+                // login walls, empty JS shells, model-written text) are demoted
+                // to a failure so the chain keeps escalating: a scraper
+                // "succeeding" with a login form must not stop the fallback.
                 #[cfg(feature = "stealth")]
                 {
                     let stealth = providers::stealth::Stealth::new(ctx.clone());
@@ -788,7 +788,8 @@ fn no_providers_error(mode: Mode, only_providers: &Option<Vec<String>>) -> Searc
 }
 
 /// Drop scrape "successes" that are walls (bot challenges, login walls, empty
-/// JS shells, binary garbage) rather than content. If nothing usable is left,
+/// JS shells, binary garbage, model-written text) rather than content. If
+/// nothing usable is left,
 /// record a structured failure so the extract chain escalates to the next
 /// provider instead of returning a wall as the page.
 fn reject_bad_scrape(
@@ -799,7 +800,7 @@ fn reject_bad_scrape(
     counts: &mut BTreeMap<String, usize>,
 ) {
     let mut first_wall = None;
-    results.retain(|r| match walls::classify_content(&r.snippet) {
+    results.retain(|r| match walls::classify_reader_text(&r.snippet) {
         Some(wall) => {
             first_wall.get_or_insert(wall);
             false
@@ -1014,6 +1015,30 @@ mod tests {
         assert_eq!(failures[0].category, FailureCategory::Blocked);
         assert_eq!(failed, vec!["jina".to_string()]);
         assert!(!counts.contains_key("jina"));
+    }
+
+    #[test]
+    fn reject_bad_scrape_fails_model_text_so_the_chain_continues() {
+        use super::reject_bad_scrape;
+        use crate::types::FailureCategory;
+        use std::collections::BTreeMap;
+        let mut note = result("https://x.com/a", "jina");
+        note.snippet = "I'm unable to access this page, but here's a rewritten version.".repeat(9);
+        let (mut failed, mut failures, mut counts) = (vec![], vec![], BTreeMap::new());
+        let mut results = vec![note];
+        counts.insert("jina".to_string(), 1);
+        reject_bad_scrape(
+            "jina",
+            &mut results,
+            &mut failed,
+            &mut failures,
+            &mut counts,
+        );
+        assert!(results.is_empty());
+        assert_eq!(failures[0].code, "model_text");
+        assert_eq!(failures[0].category, FailureCategory::Blocked);
+        assert!(failures[0].reason.contains("model-written text"));
+        assert_eq!(failed, vec!["jina".to_string()]);
     }
 
     #[test]

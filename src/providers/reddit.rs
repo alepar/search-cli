@@ -23,7 +23,9 @@ use crate::context::AppContext;
 use crate::errors::SearchError;
 use crate::providers::perplexity::{self, Perplexity};
 use crate::types::{SearchOpts, SearchResult};
+use crate::walls::{self, Wall};
 use serde_json::json;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
@@ -217,7 +219,10 @@ impl Reddit {
                     Err(e) => e,
                 };
                 tracing::warn!("reddit: Jina Reader failed ({live_error}); using the index copy");
-                let mut copy = self.index_copy(&thread).await?;
+                let mut copy = self
+                    .index_copy(&thread)
+                    .await
+                    .map_err(|e| with_live_error(e, &live_error))?;
                 set_extra(&mut copy, "live_render_error", json!(live_error));
                 Ok(vec![copy])
             }
@@ -250,13 +255,15 @@ impl Reddit {
         if page.snippet.trim().is_empty() {
             return Err("empty page".to_string());
         }
-        if let Some(wall) = crate::walls::classify_content(&page.snippet) {
+        if let Some(wall) = walls::classify_reader_text(&page.snippet) {
             return Err(format!("Jina Reader returned a {}", wall.code()));
         }
         Ok(live_result(thread, page))
     }
 
-    /// The thread's copy in the Perplexity Search API, or `no_sanctioned_route`.
+    /// The thread's copy in the Perplexity Search API. Fails with `model_text`
+    /// when the index only holds model-written copies, otherwise with
+    /// `no_sanctioned_route`.
     async fn index_copy(&self, thread: &ThreadRef) -> Result<SearchResult, SearchError> {
         let pplx = Perplexity::new(self.ctx.clone());
         let opts = scoped_opts(&SearchOpts::default());
@@ -267,32 +274,47 @@ impl Reddit {
                     .await
             }
         };
-        let mut copy = None;
-        let mut by_slug = false;
-        for (i, query) in thread.search_queries().into_iter().enumerate() {
-            copy = pick_thread_copy(thread, lookup(query).await?);
-            if copy.is_some() {
-                by_slug = i == 0 && thread.slug.is_some();
+        let mut rejected = HashSet::new();
+        let mut copies = Vec::new();
+        for query in thread.search_queries() {
+            if let Some(copy) = pick_thread_copy(thread, lookup(query).await?, &mut rejected) {
+                copies.push(copy);
                 break;
             }
         }
         // Excerpts follow the query. Found by bare ID, the index picks text
-        // that matches nothing, so ask again with the title it reported.
-        if let (false, Some(first)) = (by_slug, &copy) {
-            let query = match first.extra.as_ref().and_then(|e| e["subreddit"].as_str()) {
+        // that matches nothing, and a model's note shows only when the excerpt
+        // reaches it, so always ask again with the title it reported.
+        let title_query = copies.first().map(|(_, first)| {
+            match first.extra.as_ref().and_then(|e| e["subreddit"].as_str()) {
                 Some(sub) => format!("{} r/{sub}", first.title),
                 None => first.title.clone(),
-            };
+            }
+        });
+        if let Some(query) = title_query {
             let retry = lookup(query)
                 .await
                 .ok()
-                .and_then(|pages| pick_thread_copy(thread, pages));
-            if let Some(better) = retry.filter(|b| b.snippet.len() > first.snippet.len()) {
-                copy = Some(better);
-            }
+                .and_then(|pages| pick_thread_copy(thread, pages, &mut rejected));
+            copies.extend(retry);
         }
+        // Another excerpt of a rejected page is the same rewrite without its note.
+        let copy = copies
+            .into_iter()
+            .filter(|(index_url, _)| !rejected.contains(index_url))
+            .map(|(_, copy)| copy)
+            .max_by_key(|copy| copy.snippet.len());
         match copy {
             Some(copy) => Ok(copy),
+            None if !rejected.is_empty() => Err(SearchError::Blocked {
+                provider: Reddit::NAME,
+                code: Wall::ModelText.code(),
+                message: format!(
+                    "the index's copy of this thread is model-written text (a paraphrase or an \
+                     \"unable to access\" note), not the thread. Open it in a browser: {}",
+                    thread.canonical_url()
+                ),
+            }),
             None => Err(no_route(&format!(
                 "no search index holds a copy of this thread, and Reddit blocks automated \
                  fetches. Open it in a browser: {}",
@@ -357,11 +379,34 @@ fn no_route(message: &str) -> SearchError {
     }
 }
 
+/// Keep the live render's failure in the error when the index fails too.
+fn with_live_error(e: SearchError, live_error: &str) -> SearchError {
+    match e {
+        SearchError::Blocked {
+            provider,
+            code,
+            message,
+        } => SearchError::Blocked {
+            provider,
+            code,
+            message: format!("{message} (live render: {live_error})"),
+        },
+        other => other,
+    }
+}
+
 /// From the index's candidate pages, the one for `thread` (longest excerpt
 /// if the index returned several variants), relabelled as a Reddit result
-/// that says it is an indexed copy rather than a live fetch.
-fn pick_thread_copy(thread: &ThreadRef, pages: Vec<SearchResult>) -> Option<SearchResult> {
-    let page = pages
+/// that says it is an indexed copy rather than a live fetch, paired with the
+/// URL the index holds it under. Pages that open in a model's voice go into
+/// `rejected` and are skipped, along with any other excerpt of those URLs, in
+/// favour of the remaining candidates.
+fn pick_thread_copy(
+    thread: &ThreadRef,
+    pages: Vec<SearchResult>,
+    rejected: &mut HashSet<String>,
+) -> Option<(String, SearchResult)> {
+    let pages: Vec<SearchResult> = pages
         .into_iter()
         .filter(|p| {
             Url::parse(&p.url)
@@ -371,6 +416,16 @@ fn pick_thread_copy(thread: &ThreadRef, pages: Vec<SearchResult>) -> Option<Sear
                 .is_some_and(|t| t.id == thread.id)
         })
         .filter(|p| !p.snippet.trim().is_empty())
+        .collect();
+    rejected.extend(
+        pages
+            .iter()
+            .filter(|p| walls::is_model_text(&p.snippet))
+            .map(|p| p.url.clone()),
+    );
+    let page = pages
+        .into_iter()
+        .filter(|p| !rejected.contains(&p.url))
         .max_by_key(|p| p.snippet.len())?;
 
     // Prefer the subreddit the index saw when the input URL lacked one.
@@ -400,7 +455,7 @@ fn pick_thread_copy(thread: &ThreadRef, pages: Vec<SearchResult>) -> Option<Sear
     {
         extra["index_last_updated"] = updated.clone();
     }
-    Some(SearchResult {
+    let copy = SearchResult {
         title: page.title,
         url: canonical.canonical_url(),
         snippet: page.snippet,
@@ -408,7 +463,8 @@ fn pick_thread_copy(thread: &ThreadRef, pages: Vec<SearchResult>) -> Option<Sear
         published: page.published,
         image_url: None,
         extra: Some(extra),
-    })
+    };
+    Some((page.url, copy))
 }
 
 #[cfg(test)]
@@ -561,7 +617,11 @@ mod tests {
             ),
             long,
         ];
-        let copy = pick_thread_copy(&t, pages).unwrap();
+        let (index_url, copy) = pick_thread_copy(&t, pages, &mut HashSet::new()).unwrap();
+        assert_eq!(
+            index_url,
+            "https://www.reddit.com/r/rust/comments/1jc6gis/psa_asyncstd/"
+        );
         assert_eq!(copy.url, "https://www.reddit.com/r/rust/comments/1jc6gis/");
         assert_eq!(copy.source, "reddit");
         assert!(copy.snippet.contains("### Comments"));
@@ -600,6 +660,46 @@ mod tests {
             result("https://www.reddit.com/r/rust/comments/other1/x/", "other"),
             result("https://www.reddit.com/r/rust/comments/1jc6gis/psa/", "  "),
         ];
-        assert!(pick_thread_copy(&t, pages).is_none());
+        let mut rejected = HashSet::new();
+        assert!(pick_thread_copy(&t, pages, &mut rejected).is_none());
+        assert!(rejected.is_empty());
+    }
+
+    #[test]
+    fn model_written_copies_are_skipped_for_the_remaining_candidates() {
+        let t = thread("https://www.reddit.com/r/gpu/comments/1v4un5x/rtx/").unwrap();
+        let note = format!(
+            "### RTX\nI'm unable to access the original post, but here's a rewritten version \
+             based on the provided content:\n---\n{}",
+            "I bought a card. ".repeat(20)
+        );
+        let pages = vec![
+            result("https://www.reddit.com/r/gpu/comments/1v4un5x/rtx/", &note),
+            result(
+                "https://old.reddit.com/r/gpu/comments/1v4un5x/rtx/",
+                "### RTX\nBuy 1 card, brand new.",
+            ),
+        ];
+        let mut rejected = HashSet::new();
+        let (_, copy) = pick_thread_copy(&t, pages, &mut rejected).unwrap();
+        assert!(copy.snippet.contains("Buy 1 card"));
+        assert_eq!(rejected.len(), 1);
+
+        // Another excerpt of the rejected page, with its note cut, stays out.
+        let excerpt = vec![result(
+            "https://www.reddit.com/r/gpu/comments/1v4un5x/rtx/",
+            "### RTX\n...\n---\nI bought a card.",
+        )];
+        assert!(pick_thread_copy(&t, excerpt, &mut rejected).is_none());
+    }
+
+    #[test]
+    fn live_failure_stays_in_the_final_error() {
+        let e = with_live_error(no_route("no copy"), "Jina Reader returned a bot_wall");
+        assert_eq!(e.error_code(), "no_sanctioned_route");
+        assert_eq!(
+            e.to_string(),
+            "reddit: no copy (live render: Jina Reader returned a bot_wall)"
+        );
     }
 }

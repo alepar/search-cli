@@ -16,6 +16,9 @@ pub enum Wall {
     JsShell,
     /// Binary or undecodable bytes.
     Garbage,
+    /// A language model's note about the page (a paraphrase, an apology, an
+    /// "unable to access" message), not the page.
+    ModelText,
 }
 
 impl Wall {
@@ -25,6 +28,7 @@ impl Wall {
             Self::Login => "login_wall",
             Self::JsShell => "js_shell",
             Self::Garbage => "garbage_content",
+            Self::ModelText => "model_text",
         }
     }
 
@@ -34,12 +38,13 @@ impl Wall {
             Self::Login => "a login wall instead of content",
             Self::JsShell => "an empty JavaScript app shell instead of content",
             Self::Garbage => "binary or undecodable content",
+            Self::ModelText => "model-written text instead of the page",
         }
     }
 
     fn category(self) -> FailureCategory {
         match self {
-            Self::Bot | Self::Login => FailureCategory::Blocked,
+            Self::Bot | Self::Login | Self::ModelText => FailureCategory::Blocked,
             Self::JsShell | Self::Garbage => FailureCategory::Parse,
         }
     }
@@ -95,6 +100,113 @@ const SHELL_MAX_CHARS: usize = 80;
 const BOT_MAX_CHARS: usize = 4000;
 /// Login walls carry some chrome (footer links, a profile name), but not much.
 const LOGIN_MAX_CHARS: usize = 2500;
+
+/// Openings that only a language model writes about a page it was handed.
+const MODEL_OPENERS: &[&str] = &[
+    "here's a rewritten version",
+    "here is a rewritten version",
+    "based on the provided content",
+    "based on the provided text",
+    "as an ai,",
+    "as an ai language model",
+    "as an ai model",
+    "as an ai assistant",
+    "i can't assist with",
+    "i cannot assist with",
+];
+
+/// Openings that people write too ("I can't access my router"), so they count
+/// only alongside a [`MODEL_PIVOTS`] phrase.
+const MODEL_REFUSALS: &[&str] = &[
+    "i'm unable to access",
+    "i am unable to access",
+    "i was unable to access",
+    "i'm not able to access",
+    "i am not able to access",
+    "i cannot access",
+    "i can't access",
+    "i could not access",
+    "i couldn't access",
+    "i don't have access to",
+    "i do not have access to",
+    "i'm unable to browse",
+    "i am unable to browse",
+    "i cannot browse",
+    "i can't browse",
+];
+
+/// What a model goes on to say after refusing.
+const MODEL_PIVOTS: &[&str] = &[
+    "here's a rewritten",
+    "here is a rewritten",
+    "here's a summary",
+    "here is a summary",
+    "rewritten version",
+    "based on the provided",
+    "as an ai",
+    "paste the text",
+    "paste the content",
+];
+
+/// Apologies a model puts in front of a refusal.
+const MODEL_APOLOGIES: &[&str] = &[
+    "i'm sorry, but ",
+    "i am sorry, but ",
+    "sorry, but ",
+    "i apologize, but ",
+    "unfortunately, ",
+];
+
+/// Characters of body text examined. A model's note about the page comes
+/// first; further down the same words are a quotation or a discussion.
+const OPENING_CHARS: usize = 300;
+
+/// True when text from a third-party reader or search index opens in a model's
+/// voice. Only the start of the body counts, so a page that quotes or discusses
+/// a refusal passes. A model's rewrite that leaves no such note is not caught.
+pub fn is_model_text(content: &str) -> bool {
+    let opening = body_opening(content);
+    let body = MODEL_APOLOGIES
+        .iter()
+        .find_map(|a| opening.strip_prefix(a))
+        .unwrap_or(&opening);
+    MODEL_OPENERS.iter().any(|o| body.starts_with(o))
+        || (MODEL_REFUSALS.iter().any(|r| body.starts_with(r))
+            && MODEL_PIVOTS.iter().any(|p| body.contains(p)))
+}
+
+/// The start of the body, lowercased, with straight apostrophes.
+fn body_opening(content: &str) -> String {
+    content
+        .lines()
+        .map(str::trim)
+        .skip_while(|line| is_preamble(line))
+        .flat_map(|line| line.chars().chain(['\n']))
+        .take(OPENING_CHARS)
+        .flat_map(char::to_lowercase)
+        .map(|c| if c == '\u{2019}' { '\'' } else { c })
+        .collect()
+}
+
+/// Lines ahead of the body: the title and the index's metadata. Its comments
+/// heading is not one, because what follows it is a commenter's words.
+fn is_preamble(line: &str) -> bool {
+    let bold = line.len() > 4 && line.starts_with("**") && line.ends_with("**");
+    line.is_empty()
+        || matches!(line, "..." | "---")
+        || (line.starts_with('#') && !line.eq_ignore_ascii_case("### comments"))
+        || bold
+        || line.starts_with("author: ")
+}
+
+/// Classify text from a third-party reader or scraper: [`classify_content`]
+/// plus model-written text. First-party APIs use [`classify_content`] alone.
+pub fn classify_reader_text(content: &str) -> Option<Wall> {
+    if is_model_text(content) {
+        return Some(Wall::ModelText);
+    }
+    classify_content(content)
+}
 
 /// Classify extracted page text. `None` means it looks like content.
 pub fn classify_content(content: &str) -> Option<Wall> {
@@ -278,6 +390,83 @@ mod tests {
         // A long page with a "Log in" link in its nav is still content.
         let with_nav = format!("Log in Sign up {}", prose(120));
         assert_eq!(classify_content(&with_nav), None);
+    }
+
+    /// The first part of the copy that started this: index metadata, title,
+    /// then the note.
+    const REWRITE: &str = "**subreddit: /r/gpu**\n...\n### RTX \"pro\" 6000 WS.\nI'm unable to \
+                           access the original post from r/AIProgrammingHardware, but here's a \
+                           rewritten version based on the provided content:\n---\n**A Journey**\n\
+                           In 2025, I purchased a brand-new RTX Pro 6000 WS.";
+
+    #[test]
+    fn model_notes_at_the_opening_are_model_text() {
+        assert!(is_model_text(REWRITE));
+        for page in [
+            "Here's a rewritten version of the post:\n\nI bought a card.",
+            "# Title\n\nBased on the provided content, the author bought a card.",
+            "author: someone\n### Title\nAs an AI language model, I cannot read this page.",
+            "As an AI, I can't open links.",
+            "I'm sorry, but I can't assist with that.",
+            "I apologize, but I cannot access that URL. Please paste the text here.",
+            "I can\u{2019}t browse the web, but here\u{2019}s a summary of the likely content.",
+            "I cannot access external sites as an AI. Unfortunately that is all.",
+            "I don't have access to the article. Based on the provided title, it covers GPUs.",
+            "Unfortunately, I can't access the page. Here is a summary from the snippet.",
+        ] {
+            assert!(is_model_text(page), "{page}");
+        }
+    }
+
+    #[test]
+    fn people_saying_similar_things_is_not_model_text() {
+        for page in [
+            // A real comment on a Lemmy thread.
+            "I am unable to access the original post.\n\nIf I remember right, there was no \
+             source code for this version of the extension.",
+            "I can't access my router's admin page since the update, here's a photo of the LED.",
+            "I cannot access the BIOS. Sorry for the long post.",
+            "I'm sorry, but I can't access the site from work, so no screenshots.",
+            "As an AI researcher, I spend my days reading papers.",
+            "As an AI engineer I would not ship this.",
+            "Here's a rewrite of the function using iterators.",
+        ] {
+            assert!(!is_model_text(page), "{page}");
+        }
+    }
+
+    #[test]
+    fn model_notes_past_the_opening_are_not_model_text() {
+        // An article about refusals.
+        let article = format!(
+            "# Why chatbots refuse\n\nModels often answer \"I'm unable to access that page, but \
+             here's a rewritten version\" when they cannot fetch a URL. {}",
+            prose(40)
+        );
+        assert!(!is_model_text(&article));
+        // A quotation at the top of a post, and a model's words further down.
+        assert!(!is_model_text(
+            "> As an AI language model, I cannot.\n\nLook at this."
+        ));
+        let late = format!("{}\nAs an AI language model, I cannot.", prose(10));
+        assert!(!is_model_text(&late));
+        // A commenter quoting one, with the post itself elided by the index.
+        let thread = "### Odd chatbot\n...\n### Comments\nAs an AI language model, I cannot.\n";
+        assert!(!is_model_text(thread));
+    }
+
+    #[test]
+    fn reader_text_reports_model_text_at_any_length() {
+        let long = format!("{REWRITE}\n{}", prose(300));
+        assert!(long.chars().count() > BOT_MAX_CHARS);
+        assert_eq!(classify_reader_text(&long), Some(Wall::ModelText));
+        assert_eq!(classify_reader_text("reddit"), Some(Wall::JsShell));
+        assert_eq!(classify_reader_text(&prose(10)), None);
+        // First-party text keeps the plain classifier.
+        assert_eq!(classify_content(&long), None);
+        let failure = Wall::ModelText.failure("jina", None);
+        assert_eq!(failure.code, "model_text");
+        assert_eq!(failure.category, FailureCategory::Blocked);
     }
 
     #[test]
