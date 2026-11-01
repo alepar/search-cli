@@ -155,6 +155,7 @@ pub async fn execute_search(
         });
     }
 
+    let provider_urls = provider_urls(&buckets);
     let provider_results: BTreeMap<String, usize> = buckets
         .iter()
         .filter(|(_, items)| !items.is_empty())
@@ -213,7 +214,16 @@ pub async fn execute_search(
             cache_age_secs: None,
             provider_failures,
         },
+        provider_urls,
     })
+}
+
+/// The URLs in each provider bucket, in provider rank order.
+fn provider_urls(buckets: &[(String, Vec<SearchResult>)]) -> Vec<(String, Vec<String>)> {
+    buckets
+        .iter()
+        .map(|(name, items)| (name.clone(), items.iter().map(|r| r.url.clone()).collect()))
+        .collect()
 }
 
 type ProviderOutcome = (
@@ -378,19 +388,25 @@ fn filter_warnings(active: &[String], opts: &SearchOpts) -> Vec<String> {
     warnings
 }
 
-/// Dedup key for a URL. Strips scheme and a leading `www.` only — anchored, so
-/// it can't corrupt a `www.`/`http://` substring inside a path or query (the
-/// old unanchored `.replace()` collapsed `/files/www.x` and rewrote
-/// `?redirect=http://`, causing false dedup collisions and dropped results).
-/// The query string is preserved so paginated/parameterized URLs stay distinct.
-fn normalize_url(url: &str) -> String {
-    let lower = url.trim_end_matches('/').to_lowercase();
-    let no_scheme = lower
+/// Canonical key for a URL, used by fusion dedup and by `search stats` to
+/// match marks and extracts to provider results. Strips scheme and a leading
+/// `www.` only — anchored, so it can't corrupt a `www.`/`http://` substring
+/// inside a path or query (the old unanchored `.replace()` collapsed
+/// `/files/www.x` and rewrote `?redirect=http://`, causing false dedup
+/// collisions and dropped results). Fragments and tracking parameters go; the
+/// rest of the query string stays so paginated/parameterized URLs stay
+/// distinct. The trailing slash is trimmed last, once nothing follows it.
+pub(crate) fn normalize_url(url: &str) -> String {
+    let lower = url.to_lowercase();
+    let no_fragment = lower.split('#').next().unwrap_or(&lower);
+    let no_scheme = no_fragment
         .strip_prefix("https://")
-        .or_else(|| lower.strip_prefix("http://"))
-        .unwrap_or(&lower);
+        .or_else(|| no_fragment.strip_prefix("http://"))
+        .unwrap_or(no_fragment);
     let no_www = no_scheme.strip_prefix("www.").unwrap_or(no_scheme);
     strip_tracking_params(no_www)
+        .trim_end_matches('/')
+        .to_string()
 }
 
 /// Drop known tracking parameters from the dedup key. Without this,
@@ -450,6 +466,7 @@ pub async fn execute_special(
     let mut providers_failed = Vec::new();
     let mut provider_failures: Vec<ProviderFailure> = Vec::new();
     let mut provider_results: BTreeMap<String, usize> = BTreeMap::new();
+    let mut provider_url_lists = Vec::new();
 
     // Run one timed provider call, recording success/failure uniformly.
     macro_rules! query_provider {
@@ -507,6 +524,7 @@ pub async fn execute_special(
                 );
                 buckets.push((name.to_string(), items));
             }
+            provider_url_lists = provider_urls(&buckets);
             results = fuse_rrf(buckets);
         }
         Mode::Patents => {
@@ -644,6 +662,17 @@ pub async fn execute_special(
         });
     }
 
+    // Patents through social run one provider, so `results` is its bucket.
+    // Extract and scrape read a URL the caller chose; the scraper did not
+    // find it, so they log no provider results.
+    if provider_url_lists.is_empty()
+        && !matches!(mode, Mode::Extract | Mode::Scrape)
+        && let Some(name) = providers_queried.first()
+    {
+        let urls = results.iter().map(|r| r.url.clone()).collect();
+        provider_url_lists.push((name.clone(), urls));
+    }
+
     // Honour -c even when the upstream ignores it. Serper's scholar, places
     // and patents endpoints return a full page whatever `num` says, so `-c 3`
     // handed back ten. The fan-out path in execute_search already truncates
@@ -705,6 +734,7 @@ pub async fn execute_special(
             cache_age_secs: None,
             provider_failures,
         },
+        provider_urls: provider_url_lists,
     })
 }
 
@@ -1008,6 +1038,30 @@ mod tests {
         assert_eq!(
             normalize_url("https://www.example.com/"),
             normalize_url("http://example.com")
+        );
+    }
+
+    #[test]
+    fn fragments_do_not_split_a_page() {
+        assert_eq!(
+            normalize_url("https://a.com/post#section-2"),
+            normalize_url("https://a.com/post")
+        );
+        assert_eq!(
+            normalize_url("https://a.com/#top"),
+            normalize_url("https://a.com")
+        );
+        assert_eq!(
+            normalize_url("https://a.com/post?utm_source=x#s"),
+            normalize_url("https://a.com/post")
+        );
+    }
+
+    #[test]
+    fn trailing_slash_is_trimmed_after_trackers_are_removed() {
+        assert_eq!(
+            normalize_url("https://a.com/post/?utm_source=x"),
+            normalize_url("https://a.com/post")
         );
     }
 

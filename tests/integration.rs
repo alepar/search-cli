@@ -648,3 +648,298 @@ fn test_agent_info_describes_collection_and_count_clamping() {
     assert!(!text.contains("early-stop grace"));
     assert!(!text.contains("1.5s grace"));
 }
+
+// =============================================================================
+// Provider signal log: mark-relevant, result rows, stats
+// =============================================================================
+
+/// A binary under test with its own empty data and cache dirs, for tests that
+/// assert on log contents. The real config dir still supplies API keys.
+struct LogSandbox {
+    root: std::path::PathBuf,
+}
+
+impl LogSandbox {
+    fn new(name: &str) -> Self {
+        let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join("log-sandbox")
+            .join(name);
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        Self { root }
+    }
+
+    fn cmd(&self) -> Command {
+        let mut cmd = Command::cargo_bin("search").unwrap();
+        cmd.env("XDG_CACHE_HOME", self.root.join("cache"))
+            .env("XDG_DATA_HOME", self.root.join("data"))
+            .env_remove("SEARCH_LOG");
+        // macOS ignores XDG and derives every app dir from HOME.
+        if cfg!(target_os = "macos") {
+            cmd.env("HOME", &self.root);
+        }
+        cmd
+    }
+
+    fn log_dir(&self) -> std::path::PathBuf {
+        if cfg!(target_os = "macos") {
+            self.root.join("Library/Application Support/search/logs")
+        } else {
+            self.root.join("data/search/logs")
+        }
+    }
+
+    /// Rows across every log file of one kind.
+    fn rows(&self, kind: &str) -> Vec<serde_json::Value> {
+        let Ok(dir) = std::fs::read_dir(self.log_dir()) else {
+            return Vec::new();
+        };
+        dir.flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with(kind))
+            .flat_map(|e| {
+                let text = std::fs::read_to_string(e.path()).unwrap();
+                text.lines()
+                    .map(|l| serde_json::from_str(l).expect("every log line is JSON"))
+                    .collect::<Vec<serde_json::Value>>()
+            })
+            .collect()
+    }
+
+    fn seed(&self, file: &str, lines: &[serde_json::Value]) {
+        std::fs::create_dir_all(self.log_dir()).unwrap();
+        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        std::fs::write(self.log_dir().join(file), text).unwrap();
+    }
+}
+
+fn stdout_json(cmd: &mut Command) -> serde_json::Value {
+    let output = cmd.arg("--json").output().unwrap();
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+#[test]
+fn mark_relevant_appends_one_row_per_url() {
+    let sb = LogSandbox::new("mark");
+    let out = stdout_json(
+        sb.cmd()
+            .args(["mark-relevant", "https://a.test/x", "https://b.test/y"]),
+    );
+    assert_eq!(out["status"], "success");
+    assert_eq!(out["recorded"], 2);
+    let rows = sb.rows("marks_");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[1]["url"], "https://b.test/y");
+    assert!(rows[0]["ts"].is_u64());
+}
+
+#[test]
+fn mark_relevant_rejects_non_web_urls_and_records_nothing() {
+    let sb = LogSandbox::new("mark-bad");
+    sb.cmd()
+        .args(["mark-relevant", "https://a.test", "file:///etc/passwd"])
+        .assert()
+        .code(3);
+    sb.cmd()
+        .args(["mark-relevant", "not a url"])
+        .assert()
+        .code(3);
+    sb.cmd().args(["mark-relevant"]).assert().code(3);
+    assert!(sb.rows("marks_").is_empty());
+}
+
+#[test]
+fn search_log_off_disables_marks() {
+    let sb = LogSandbox::new("mark-off");
+    let out = stdout_json(
+        sb.cmd()
+            .env("SEARCH_LOG", "off")
+            .args(["mark-relevant", "https://a.test"]),
+    );
+    assert_eq!(out["status"], "success");
+    assert_eq!(out["recorded"], 0);
+    assert!(!sb.log_dir().exists());
+}
+
+#[test]
+fn concurrent_marks_stay_whole_lines() {
+    let sb = LogSandbox::new("mark-concurrent");
+    let children: Vec<_> = (0..16)
+        .map(|i| {
+            let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("search"));
+            cmd.env("XDG_CACHE_HOME", sb.root.join("cache"))
+                .env("XDG_DATA_HOME", sb.root.join("data"))
+                .env_remove("SEARCH_LOG")
+                .stdout(std::process::Stdio::null())
+                .arg("--json")
+                .arg("mark-relevant");
+            if cfg!(target_os = "macos") {
+                cmd.env("HOME", &sb.root);
+            }
+            for n in 0..20 {
+                cmd.arg(format!("https://a.test/{i}/{n}"));
+            }
+            cmd.spawn().unwrap()
+        })
+        .collect();
+    for mut child in children {
+        assert!(child.wait().unwrap().success());
+    }
+    assert_eq!(sb.rows("marks_").len(), 16 * 20);
+}
+
+#[test]
+fn stats_reports_provider_signal() {
+    let sb = LogSandbox::new("stats");
+    let ts = now_secs() - 3600;
+    let row = |provider: &str, url: &str| {
+        serde_json::json!({"v": 1, "ts": ts, "search_id": "s1", "mode": "general",
+                           "provider": provider, "rank": 1, "url": url})
+    };
+    let today = "2099-01-01"; // Future-dated names are never skipped as old.
+    sb.seed(
+        &format!("results_{today}.jsonl"),
+        &[
+            row("brave", "https://shared.test/a"),
+            row("exa", "https://shared.test/a?utm_source=x"),
+            row("exa", "https://exa-only.test/b"),
+            row("serper", "https://serper-only.test/c"),
+        ],
+    );
+    sb.seed(
+        &format!("searches_{today}.jsonl"),
+        &[
+            serde_json::json!({"v": 1, "ts": ts, "search_id": "s1", "query": "q",
+                "mode": "general", "providers_queried": ["brave", "exa", "serper"]}),
+            serde_json::json!({"v": 1, "ts": ts + 1, "query": "https://serper-only.test/c",
+                "mode": "extract", "result_count": 1, "providers_queried": ["jina"]}),
+        ],
+    );
+    sb.cmd()
+        .args([
+            "mark-relevant",
+            "https://www.shared.test/a#intro",
+            "https://exa-only.test/b",
+            "https://elsewhere.test/d",
+        ])
+        .assert()
+        .success();
+
+    let out = stdout_json(sb.cmd().arg("stats"));
+    let signal = &out["stats"]["provider_signal"];
+    assert_eq!(signal["marked_urls"], 3);
+    assert_eq!(signal["marked_unattributed"], 1);
+    let exa = &signal["providers"]["exa"];
+    assert_eq!(exa["results"], 2);
+    assert_eq!(exa["unique"], 1);
+    assert_eq!(exa["relevant"], 2);
+    assert_eq!(exa["unique_relevant"], 1);
+    assert_eq!(exa["precision"], 1.0);
+    assert_eq!(exa["cost_per_relevant_usd"], 0.0035);
+    let brave = &signal["providers"]["brave"];
+    assert_eq!(
+        (&brave["relevant"], &brave["unique_relevant"]),
+        (&1.into(), &0.into())
+    );
+    assert!(brave["cost_per_unique_relevant_usd"].is_null());
+    let serper = &signal["providers"]["serper"];
+    assert_eq!(
+        (&serper["relevant"], &serper["extracted"]),
+        (&0.into(), &1.into())
+    );
+}
+
+#[test]
+fn prune_covers_every_log_kind() {
+    let sb = LogSandbox::new("prune");
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 86400);
+    let line = [serde_json::json!({"ts": 1})];
+    for name in [
+        "searches_2020-01-01.jsonl",
+        "results_2020-01-01.jsonl",
+        "marks_2020-01-01.jsonl",
+    ] {
+        sb.seed(name, &line);
+        let file = std::fs::File::options()
+            .write(true)
+            .open(sb.log_dir().join(name))
+            .unwrap();
+        file.set_modified(old).unwrap();
+    }
+    sb.seed("marks_2099-01-01.jsonl", &line);
+    let out = stdout_json(sb.cmd().args(["stats", "--prune", "30"]));
+    assert_eq!(out["pruned_files"], 3);
+    assert!(sb.log_dir().join("marks_2099-01-01.jsonl").exists());
+}
+
+#[test]
+fn agent_info_lists_mark_relevant() {
+    let out = stdout_json(search_cmd().arg("agent-info"));
+    let commands = out["commands"].as_array().unwrap();
+    assert!(commands.iter().any(|c| c == "mark-relevant"));
+    assert!(out["command_schemas"]["mark-relevant"].is_object());
+}
+
+// One billed Serper call per fresh run; patents is Serper-only and cacheable.
+#[test]
+fn fresh_search_logs_rows_and_cached_replay_logs_none() {
+    if !has_provider("serper") {
+        return;
+    }
+    let sb = LogSandbox::new("live-cache");
+    let search = |sb: &LogSandbox| {
+        stdout_json(
+            sb.cmd()
+                .args([
+                    "-m",
+                    "patents",
+                    "-c",
+                    "3",
+                    "-q",
+                    "solid state battery electrolyte",
+                ])
+                .arg("--quiet"),
+        )
+    };
+    let first = search(&sb);
+    assert_eq!(first["status"], "success", "{first}");
+    let rows = sb.rows("results_").len();
+    assert!(rows > 0);
+    assert!(sb
+        .rows("results_")
+        .iter()
+        .all(|r| r["provider"] == "serper"));
+
+    let replay = search(&sb);
+    assert_eq!(replay["metadata"]["cached"], true);
+    assert_eq!(sb.rows("results_").len(), rows);
+    assert_eq!(sb.rows("searches_").len(), 2);
+}
+
+#[test]
+fn search_log_off_writes_no_result_rows() {
+    if !has_provider("serper") {
+        return;
+    }
+    let sb = LogSandbox::new("live-off");
+    sb.cmd()
+        .env("SEARCH_LOG", "off")
+        .args([
+            "-m",
+            "patents",
+            "-c",
+            "1",
+            "-q",
+            "perovskite tandem cell",
+            "--json",
+        ])
+        .assert()
+        .success();
+    assert!(!sb.log_dir().exists());
+}

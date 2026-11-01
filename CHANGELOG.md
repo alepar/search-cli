@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+Features:
+- Every provider's raw results are logged before fusion, one row per result,
+  to daily `results_*.jsonl` files: provider, URL, rank, mode, search id and
+  timestamp. No snippets or content. Cached replays and extract/scrape add no
+  rows. `searches_*` lines gain `search_id`.
+- New `search mark-relevant <URL>...` records pages found relevant after
+  reading them, with any tool, in daily `marks_*.jsonl` files.
+- `search stats` gains a provider signal section (`provider_signal` in JSON):
+  unique relevant, relevant, precision, cost per relevant and per unique
+  relevant URL, results, distinct and unique URLs, extracted. A mark or extract
+  credits providers that returned the URL in the 7 days before it.
+- `search stats --prune` also removes `results_*` and `marks_*`. Nothing is
+  deleted automatically.
+
+Behaviour changes:
+- URL dedup now ignores fragments, and removes tracking parameters before
+  trimming the trailing slash. `page#a` merges with `page` and `/a/?utm_source=x`
+  merges with `/a` in fusion, so such pairs now rank as one result found by
+  both providers. `search stats` read-through uses the same matching, which
+  also ignores scheme and `www.`.
+
 ## 0.12.2 — 2026-10-31
 
 - `search agent-info` now states that fused modes wait for every provider and

@@ -828,7 +828,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 "name": "search",
                 "version": env!("CARGO_PKG_VERSION"),
                 "description": env!("CARGO_PKG_DESCRIPTION"),
-                "commands": ["search", "verify", "usage", "billing", "doctor", "stats", "cache clear", "config show", "config set", "config check", "config path", "agent-info", "providers", "skill install", "skill status", "update"],
+                "commands": ["search", "verify", "usage", "billing", "doctor", "stats", "mark-relevant", "cache clear", "config show", "config set", "config check", "config path", "agent-info", "providers", "skill install", "skill status", "update"],
                 "command_schemas": {
                     "search": {
                         "description": "Search across providers",
@@ -910,12 +910,19 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                         "options": []
                     },
                     "stats": {
-                        "description": "Local usage analytics from the search logs: volume, modes, per-provider calls/failures, estimated spend, measured balance burn, cache-hit rate, read-through",
+                        "description": "Local usage analytics from the search logs: volume, modes, per-provider calls/failures, estimated spend, measured balance burn, cache-hit rate, read-through, and per-provider signal (provider_signal): results returned, unique URLs, URLs marked relevant, unique relevant, extracted, precision, cost per relevant result",
                         "args": [],
                         "options": [
                             {"name": "--days", "type": "integer", "required": false, "default": 30, "description": "Analysis window"},
                             {"name": "--prune", "type": "integer", "required": false, "description": "Delete log files older than N days, then exit"}
                         ]
+                    },
+                    "mark-relevant": {
+                        "description": "Record pages found relevant after reading them in full, whichever tool fetched them. `search stats` credits every provider that returned the URL in the 7 days before the mark. Matches on canonical URL; no search id is needed. Exit 3 on a non-http(s) URL. A no-op with recorded=0 under SEARCH_LOG=off.",
+                        "args": [
+                            {"name": "urls", "type": "string[]", "required": true, "description": "Full http(s) URLs"},
+                        ],
+                        "options": []
                     },
                     "cache clear": {"description": "Delete all cached query results", "args": [], "options": []},
                 },
@@ -1038,6 +1045,34 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 }));
             } else if !ctx.suppress_human() {
                 stats::render_human(&report);
+            }
+            Ok(0)
+        }
+
+        Commands::MarkRelevant(args) => {
+            let bad = args.urls.iter().find(
+                |u| !matches!(url::Url::parse(u), Ok(p) if matches!(p.scheme(), "http" | "https")),
+            );
+            if let Some(bad) = bad {
+                let err = errors::SearchError::InvalidInput {
+                    message: format!("not an http(s) URL: {bad}"),
+                };
+                if ctx.is_json() {
+                    output::json::render_error(&err);
+                } else {
+                    eprintln!("Error: {err}");
+                }
+                return Ok(err.exit_code());
+            }
+            let recorded = logging::log_marks(&args.urls);
+            if ctx.is_json() {
+                output::json::render_value(&serde_json::json!({
+                    "version": types::ENVELOPE_VERSION,
+                    "status": "success",
+                    "recorded": recorded,
+                }));
+            } else if !ctx.suppress_human() {
+                eprintln!("Recorded {recorded} of {} URLs", args.urls.len());
             }
             Ok(0)
         }

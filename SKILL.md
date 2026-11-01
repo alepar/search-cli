@@ -39,6 +39,7 @@ Quick examples:
 - `search billing --json` — monthly usage per provider, last 6 months (provider history where available, else local-log estimates; each cell tagged with its source)
 - `search doctor --json` — test-fire every configured provider (health preflight; one billed call each)
 - `search stats --json` — local analytics: spend, modes, provider quality, cache hits
+- `search mark-relevant <URL>...` — after reading a page in full and finding it useful, with any tool; `search stats` credits the providers that returned it
 
 Useful flags: `--no-cache` (force fresh results — replays are otherwise served
 for 5 min and marked `cached: true`), `--max-chars 500` (cap snippet size to

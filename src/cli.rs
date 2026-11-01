@@ -124,6 +124,10 @@ pub enum Commands {
     /// Usage statistics from the local search logs (spend, modes, providers)
     Stats(StatsArgs),
 
+    /// Record pages found relevant after reading them in full, with any
+    /// tool, so `search stats` can credit the providers that returned them
+    MarkRelevant(MarkRelevantArgs),
+
     /// Manage the local query cache
     Cache {
         #[command(subcommand)]
@@ -151,6 +155,13 @@ pub struct StatsArgs {
     /// Delete log files older than this many days, then exit
     #[arg(long)]
     pub prune: Option<u64>,
+}
+
+#[derive(Parser)]
+pub struct MarkRelevantArgs {
+    /// Full http(s) URLs of the pages
+    #[arg(required = true)]
+    pub urls: Vec<String>,
 }
 
 #[derive(Subcommand)]

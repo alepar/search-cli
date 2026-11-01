@@ -345,8 +345,41 @@ Reports search volume by mode, per-provider call counts / failures /
 cancellations, estimated spend (from a static price table), **measured**
 balance burn (deltas between `search usage` snapshots), cache-hit rate,
 repeated queries, and a read-through table — which providers' results agents
-actually extract afterwards, the closest local proxy for result usefulness.
-Set `SEARCH_LOG=off` to disable logging entirely.
+actually extract afterwards.
+
+**Provider signal** shows which providers earn their keep, not just which ones
+return results:
+
+```bash
+search mark-relevant https://example.com/page   # after reading it in full, with any tool
+search stats                                    # see "provider signal"
+```
+
+| Column | Meaning |
+|--------|---------|
+| `uniq-rel` | URLs marked relevant that no other provider returned: what you lose without this provider |
+| `relevant` | URLs this provider returned that were later marked relevant |
+| `prec` | `relevant` / `urls` |
+| `$/rel`, `$/uniq` | Estimated search spend per relevant / unique relevant URL (extract and scrape calls excluded) |
+| `results` | Result rows returned, repeats included |
+| `urls`, `unique` | Distinct URLs returned, and those no other provider returned |
+| `extract` | Returned URLs later read with `-m extract` or `-m scrape` |
+
+Every provider's raw results are logged before fusion, one row per result:
+provider, URL, rank, mode, search id and timestamp, never snippets or page text.
+Cached replays add no rows, and extract and scrape log none, since the caller
+chose that URL. A mark or extract matches on canonical URL (no scheme, `www.`,
+fragment, trailing slash or tracking parameters) and credits every provider
+that returned the URL in the 7 days before it. Marked URLs no provider returned
+are counted separately. `search stats --json` carries all of this in
+`provider_signal`.
+
+Logs are daily JSONL files in `~/.local/share/search/logs/` (Linux):
+`searches_*`, `results_*` and `marks_*`. Expect roughly 150 bytes per result
+row, so about 7-25 MB a month at 1,500-5,000 searches. **Nothing is deleted
+automatically**; `search stats --prune N` removes files of all three kinds older
+than N days, which also drops those months from `search billing` estimates.
+Set `SEARCH_LOG=off` to disable all of it, `mark-relevant` included.
 
 ## Configuration
 

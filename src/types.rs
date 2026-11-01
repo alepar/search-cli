@@ -188,6 +188,12 @@ pub struct SearchResponse {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub answers: Vec<Answer>,
     pub metadata: ResponseMetadata,
+    /// Every URL each provider returned, before fusion and truncation, for
+    /// the per-provider result log. Never serialized, so the JSON envelope
+    /// stays unchanged and cached replays carry none: a replay made no
+    /// provider calls and must not count as results again.
+    #[serde(skip)]
+    pub provider_urls: Vec<(String, Vec<String>)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
