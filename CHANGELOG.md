@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.13.1 — 2026-11-01
 
 Fixes:
 - Extract and scrape reject reader and index text that opens in a model's voice
