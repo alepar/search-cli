@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.13.0 — 2026-11-01
 
 Features:
 - Every provider's raw results are logged before fusion, one row per result,
