@@ -411,6 +411,7 @@ fn test_real_reddit_extract() {
         return;
     }
     let output = search_cmd()
+        .env("SEARCH_REDDIT_READER", "index")
         .args([
             "search",
             "-q",

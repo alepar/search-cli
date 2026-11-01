@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.14.0 — 2026-11-01
 
 Features:
 - `reddit.reader` is now an ordered, comma-separated chain, for example

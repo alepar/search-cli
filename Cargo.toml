@@ -1,6 +1,6 @@
 [package]
 name = "agent-search"
-version = "0.13.1"
+version = "0.14.0"
 edition = "2024"
 rust-version = "1.89"
 description = "Unified multi-provider search CLI for AI agents — 14 providers, 13 modes, email verification, one binary"
