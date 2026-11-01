@@ -12,7 +12,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Rough per-call cost estimates in USD, from provider pricing pages
 /// (2026-07). Estimates only — `search usage` balance snapshots are ground
-/// truth where available. Keyed by base provider name.
+/// truth where available. Takes a logged provider name; a product priced on
+/// its own is matched in full, everything else by its base provider.
 /// Round a summed USD estimate to a micro-dollar, below any per-call
 /// price, so float accumulation noise (0.17500000000000007) never shows.
 pub(crate) fn round_usd(v: f64) -> f64 {
@@ -20,7 +21,11 @@ pub(crate) fn round_usd(v: f64) -> f64 {
 }
 
 pub(crate) fn estimated_cost_per_call(provider: &str) -> f64 {
-    match provider {
+    // Extract: $4 per 1,000 pages (kagi.com/api/pricing, 2026-11).
+    if provider == crate::providers::kagi::EXTRACT_SOURCE {
+        return 0.004;
+    }
+    match base_provider(provider) {
         "serper" => 0.001,
         "jina" => 0.0005,
         "firecrawl" => 0.002,
@@ -305,7 +310,7 @@ fn provider_signal(
         }
         for p in str_array(e, "providers_queried") {
             let base = base_provider(&p).to_string();
-            let cost = estimated_cost_per_call(&base);
+            let cost = estimated_cost_per_call(&p);
             signal.providers.entry(base).or_default().search_spend_usd += cost;
         }
     }
@@ -372,7 +377,7 @@ fn aggregate(
                 let base = base_provider(&p).to_string();
                 let stat = by_provider.entry(base.clone()).or_default();
                 stat.calls += 1;
-                stat.estimated_spend_usd += estimated_cost_per_call(&base);
+                stat.estimated_spend_usd += estimated_cost_per_call(&p);
             }
             for p in str_array(e, "providers_failed") {
                 by_provider
@@ -743,6 +748,21 @@ mod tests {
         ];
         let s = provider_signal(&results, &[], &entries);
         assert_eq!(s.providers["exa"].extracted, 1);
+    }
+
+    #[test]
+    fn kagi_extract_is_priced_as_a_page_and_counted_under_kagi() {
+        assert_eq!(estimated_cost_per_call("kagi_extract"), 0.004);
+        assert_eq!(estimated_cost_per_call("kagi"), 0.012);
+        assert_eq!(estimated_cost_per_call("brave_llm_context"), 0.005);
+        let entries = vec![json!({
+            "ts": 1, "query": "https://www.reddit.com/r/a/comments/b/", "mode": "extract",
+            "providers_queried": ["reddit", "kagi_extract", "kagi_extract"],
+        })];
+        let r = aggregate(&entries, 7, 1, BTreeMap::new(), Signal::default());
+        assert_eq!(r.by_provider["kagi"].calls, 2);
+        assert_eq!(round_usd(r.by_provider["kagi"].estimated_spend_usd), 0.008);
+        assert_eq!(r.by_provider["reddit"].estimated_spend_usd, 0.0);
     }
 
     #[test]

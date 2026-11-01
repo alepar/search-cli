@@ -32,6 +32,11 @@ pub trait Route: Send + Sync {
     fn fallback_to_chain(&self) -> bool {
         false
     }
+    /// Paid calls the route made under its own name, for the metadata and
+    /// spend estimates. Listed whether or not the fetch succeeded.
+    fn billed_calls(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// The routing table, first match wins. `walled` stays last so a site with a

@@ -14,20 +14,24 @@
 //! post ID. Both say where the text came from, and neither falls back to
 //! fetching reddit.com.
 //!
-//! One opt-in departs from that: with `reddit.reader = "jina"` the extract
-//! route asks Jina Reader to render the live thread, which reddit.com's terms
-//! do not sanction, and falls back to the indexed copy when that fails. It is
-//! off unless the user sets it, and every use logs a warning.
+//! `reddit.reader` departs from that, off unless the user sets it. It names
+//! readers the extract route tries in order before the indexed copy. `jina`
+//! and `kagi` ask a third party to render the live thread, which reddit.com's
+//! terms do not sanction. `arctic_shift` reads an archive that collected
+//! through the Data API. Every use logs a warning.
 
 use crate::context::AppContext;
 use crate::errors::SearchError;
+use crate::providers::kagi::{self, Kagi};
 use crate::providers::perplexity::{self, Perplexity};
-use crate::types::{SearchOpts, SearchResult};
+use crate::providers::{arctic_shift, Provider};
+use crate::types::{FailureCategory, SearchOpts, SearchResult};
 use crate::walls::{self, Wall};
 use serde_json::json;
 use std::collections::HashSet;
-use std::sync::Arc;
-use std::time::Duration;
+use std::future::Future;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use url::Url;
 
 /// Domain scope the reddit mode forces on every provider.
@@ -38,13 +42,23 @@ pub const DOMAIN: &str = "reddit.com";
 const EXTRACT_TOKENS_PER_PAGE: u32 = 4096;
 /// Candidate pages examined for the target post ID.
 const EXTRACT_CANDIDATES: usize = 10;
-/// Jina Reader takes about 40 s to render a Reddit thread. The route's own
-/// 60 s budget leaves room for the index fallback after this.
+/// The whole route, inside the engine's 60 s limit. That limit cancels the
+/// fetch and every failure recorded so far, so the route stops itself first.
+const ROUTE_BUDGET: Duration = Duration::from_secs(58);
+/// The readers' share of it; the rest is held back for the index fallback.
+const READER_BUDGET: Duration = Duration::from_secs(45);
+/// Jina Reader takes about 40 s to render a Reddit thread.
 const JINA_DEADLINE: Duration = Duration::from_secs(45);
+/// One Kagi Extract call: the API's own 10 s limit plus the round trip.
+const KAGI_DEADLINE: Duration = Duration::from_secs(15);
+/// Reddit blocks Kagi's fetcher now and then, and the next try usually passes.
+const KAGI_ATTEMPTS: usize = 3;
+const KAGI_RETRY_DELAY: Duration = Duration::from_secs(2);
 /// Shown with every index copy while `reddit.reader` is unset, so an agent
-/// can offer the opt-in. Setting either value silences it.
-pub const READER_HINT: &str = "Full live threads are available through Jina Reader as an opt-in \
-     (outside Reddit's terms): `search config set reddit.reader jina`; \
+/// can offer the opt-in. Setting any value silences it.
+pub const READER_HINT: &str = "Index copies are rewritten excerpts. Full threads are an opt-in, \
+     outside Reddit's terms: `search config set reddit.reader kagi,arctic_shift` tries a live \
+     Kagi render, then the Arctic Shift archive (`jina` is also a reader); \
      `search config set reddit.reader index` keeps index copies and hides this hint";
 
 /// A Reddit thread, identified by its base-36 post ID.
@@ -190,20 +204,38 @@ pub fn scoped_opts(opts: &SearchOpts) -> SearchOpts {
 /// Reads one thread for extract/scrape. Provider name "reddit".
 pub struct Reddit {
     ctx: Arc<AppContext>,
+    billed: Mutex<Vec<String>>,
 }
 
 impl Reddit {
     pub const NAME: &'static str = "reddit";
 
     pub fn new(ctx: Arc<AppContext>) -> Self {
-        Self { ctx }
+        Self {
+            ctx,
+            billed: Mutex::new(Vec::new()),
+        }
     }
 
-    /// One thread for extract. By default its indexed copy, found in the
-    /// Perplexity Search API by post ID. With `reddit.reader = "jina"`, the
-    /// live thread rendered by Jina Reader first. Errors with
-    /// `no_sanctioned_route` when the URL is not a thread or nothing could be
-    /// read.
+    /// Paid calls made so far that the route's name does not cover.
+    pub fn take_billed_calls(&self) -> Vec<String> {
+        self.billed
+            .lock()
+            .map(|mut calls| std::mem::take(&mut *calls))
+            .unwrap_or_default()
+    }
+
+    fn bill(&self, name: &str) {
+        if let Ok(mut calls) = self.billed.lock() {
+            calls.push(name.to_string());
+        }
+    }
+
+    /// One thread for extract: the readers in `reddit.reader` in order, then
+    /// its indexed copy, found in the Perplexity Search API by post ID. What
+    /// went wrong with each reader stays with the result, or in the error if
+    /// the index fails too. Errors with `no_sanctioned_route` when the URL is
+    /// not a thread or nothing could be read.
     pub async fn fetch_thread(&self, url: &Url) -> Result<Vec<SearchResult>, SearchError> {
         let Some(thread) = parse_thread(url) else {
             return Err(no_route(
@@ -212,35 +244,51 @@ impl Reddit {
                  `search -m reddit -q <topic>`",
             ));
         };
-        match Reader::from_config(&self.ctx.config.reddit.reader) {
-            Reader::Jina => {
-                let live_error = match self.live_render(&thread).await {
-                    Ok(page) => return Ok(vec![page]),
-                    Err(e) => e,
-                };
-                tracing::warn!("reddit: Jina Reader failed ({live_error}); using the index copy");
-                let mut copy = self
-                    .index_copy(&thread)
-                    .await
-                    .map_err(|e| with_live_error(e, &live_error))?;
-                set_extra(&mut copy, "live_render_error", json!(live_error));
-                Ok(vec![copy])
+        let started = Instant::now();
+        let chain = ReaderChain::from_config(&self.ctx.config.reddit.reader);
+        let (page, failures) = run_readers(&chain, started, READER_BUDGET, |reader| {
+            let thread = &thread;
+            async move { self.read(reader, thread, started).await }
+        })
+        .await;
+        if let Some(mut page) = page {
+            if !failures.is_empty() {
+                set_extra(&mut page, "reader_errors", failures_json(&failures));
             }
-            Reader::Index { hint } => {
-                let mut copy = self.index_copy(&thread).await?;
-                if hint {
-                    set_extra(&mut copy, "reader_hint", json!(READER_HINT));
-                }
-                Ok(vec![copy])
-            }
+            return Ok(vec![page]);
+        }
+        let left = ROUTE_BUDGET.saturating_sub(started.elapsed());
+        let mut copy = tokio::time::timeout(left, self.index_copy(&thread))
+            .await
+            .unwrap_or_else(|_| Err(no_route("the index did not answer in time")))
+            .map_err(|e| with_reader_errors(e, &failures))?;
+        if !failures.is_empty() {
+            set_extra(&mut copy, "reader_errors", failures_json(&failures));
+        }
+        if chain.hint {
+            set_extra(&mut copy, "reader_hint", json!(READER_HINT));
+        }
+        Ok(vec![copy])
+    }
+
+    async fn read(
+        &self,
+        reader: Reader,
+        thread: &ThreadRef,
+        started: Instant,
+    ) -> Result<SearchResult, String> {
+        match reader {
+            Reader::Jina => self.jina_render(thread).await,
+            Reader::Kagi => self.kagi_render(thread).await,
+            Reader::ArcticShift => self.arctic_copy(thread, started).await,
         }
     }
 
     /// The live thread through Jina Reader. A wall or an empty page counts
-    /// as a failure, so the caller falls back to the index.
-    async fn live_render(&self, thread: &ThreadRef) -> Result<SearchResult, String> {
+    /// as a failure, so the caller moves on.
+    async fn jina_render(&self, thread: &ThreadRef) -> Result<SearchResult, String> {
         tracing::warn!(
-            "reddit: reading the live thread through Jina Reader (reddit.reader = jina); \
+            "reddit: reading the live thread through Jina Reader (reddit.reader); \
              Reddit's terms do not permit unauthorised automated access"
         );
         let jina = super::jina::Jina::new(self.ctx.clone());
@@ -258,7 +306,69 @@ impl Reddit {
         if let Some(wall) = walls::classify_reader_text(&page.snippet) {
             return Err(format!("Jina Reader returned a {}", wall.code()));
         }
-        Ok(live_result(thread, page))
+        Ok(live_result(thread, page.title, page.snippet, "jina_reader"))
+    }
+
+    /// The live thread through Kagi Extract. A block is retried, since the
+    /// next try usually passes; any other failure moves on at once. Every
+    /// call is billed, including a blocked one.
+    async fn kagi_render(&self, thread: &ThreadRef) -> Result<SearchResult, String> {
+        let kagi = Kagi::new(self.ctx.clone());
+        if !kagi.is_configured() {
+            return Err("no Kagi API key (keys.kagi or KAGI_API_KEY)".to_string());
+        }
+        tracing::warn!(
+            "reddit: reading the live thread through Kagi Extract (reddit.reader); \
+             Reddit's terms do not permit unauthorised automated access"
+        );
+        let url = thread.canonical_url();
+        for attempt in 1..=KAGI_ATTEMPTS {
+            if attempt > 1 {
+                tokio::time::sleep(KAGI_RETRY_DELAY).await;
+            }
+            self.bill(kagi::EXTRACT_SOURCE);
+            let markdown = kagi
+                .extract_page(&url, KAGI_DEADLINE)
+                .await
+                .map_err(|e| e.to_string())?;
+            match walls::classify_reader_text(&markdown) {
+                None => {
+                    let title = markdown_title(&markdown);
+                    return Ok(live_result(thread, title, markdown, kagi::EXTRACT_SOURCE));
+                }
+                Some(wall) if is_block(wall) && attempt < KAGI_ATTEMPTS => {
+                    tracing::warn!(
+                        "reddit: Kagi Extract returned a {} (attempt {attempt} of \
+                         {KAGI_ATTEMPTS})",
+                        wall.code()
+                    );
+                }
+                Some(wall) if is_block(wall) => {
+                    return Err(format!(
+                        "Kagi Extract returned a {} on all {KAGI_ATTEMPTS} attempts",
+                        wall.code()
+                    ));
+                }
+                Some(wall) => return Err(format!("Kagi Extract returned a {}", wall.code())),
+            }
+        }
+        unreachable!("the last attempt returns")
+    }
+
+    /// The thread from the Arctic Shift archive. Structured records, not a
+    /// page, so there is no wall to look for.
+    async fn arctic_copy(
+        &self,
+        thread: &ThreadRef,
+        started: Instant,
+    ) -> Result<SearchResult, String> {
+        tracing::warn!(
+            "reddit: reading the thread from the Arctic Shift archive (reddit.reader); \
+             Reddit has not licensed it, and it may hold text deleted from Reddit"
+        );
+        let end = started + READER_BUDGET;
+        let archived = arctic_shift::fetch_thread(&self.ctx.client, &thread.id, end).await?;
+        Ok(archive_result(thread, archived))
     }
 
     /// The thread's copy in the Perplexity Search API. Fails with `model_text`
@@ -324,22 +434,134 @@ impl Reddit {
     }
 }
 
-/// What `reddit.reader` selects. Anything but "jina" reads the index; only an
-/// unset value carries the opt-in hint.
-#[derive(Debug, PartialEq, Eq)]
+/// A reader `reddit.reader` can name. The index is not one: it always runs
+/// last.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Reader {
-    Index { hint: bool },
     Jina,
+    Kagi,
+    ArcticShift,
 }
 
 impl Reader {
-    fn from_config(value: &str) -> Self {
-        match value.trim() {
-            "jina" => Self::Jina,
-            "" => Self::Index { hint: true },
-            _ => Self::Index { hint: false },
+    fn name(self) -> &'static str {
+        match self {
+            Self::Jina => "jina",
+            Self::Kagi => "kagi",
+            Self::ArcticShift => arctic_shift::SOURCE,
         }
     }
+}
+
+/// `reddit.reader` parsed for a run. `config set` validates the value, but a
+/// hand-edited file or the env override may not be valid: a name this build
+/// does not know is reported, and the read goes on without it.
+#[derive(Debug, PartialEq, Eq)]
+struct ReaderChain {
+    readers: Vec<Reader>,
+    unknown: Vec<String>,
+    /// Unset: carry the opt-in hint.
+    hint: bool,
+}
+
+impl ReaderChain {
+    fn from_config(value: &str) -> Self {
+        let names = crate::config::reddit_reader_names(value);
+        let mut chain = Self {
+            readers: Vec::new(),
+            unknown: Vec::new(),
+            hint: names.is_empty(),
+        };
+        for name in names {
+            match name {
+                "index" => {}
+                "jina" => chain.readers.push(Reader::Jina),
+                "kagi" => chain.readers.push(Reader::Kagi),
+                "arctic_shift" => chain.readers.push(Reader::ArcticShift),
+                other => chain.unknown.push(other.to_string()),
+            }
+        }
+        chain
+    }
+}
+
+/// A reader that gave no thread, and why.
+#[derive(Debug, PartialEq, Eq)]
+struct ReaderFailure {
+    reader: String,
+    error: String,
+}
+
+/// Try each reader in turn until one returns a page, within `budget` of
+/// `started`. Returns that page, if any, and every failure on the way to it.
+async fn run_readers<F, Fut>(
+    chain: &ReaderChain,
+    started: Instant,
+    budget: Duration,
+    read: F,
+) -> (Option<SearchResult>, Vec<ReaderFailure>)
+where
+    F: Fn(Reader) -> Fut,
+    Fut: Future<Output = Result<SearchResult, String>>,
+{
+    let mut failures: Vec<ReaderFailure> = chain
+        .unknown
+        .iter()
+        .map(|name| {
+            tracing::warn!("reddit: unknown reader '{name}' in reddit.reader; skipped");
+            ReaderFailure {
+                reader: name.clone(),
+                error: "not a reader this build knows".to_string(),
+            }
+        })
+        .collect();
+    for (i, reader) in chain.readers.iter().enumerate() {
+        let left = budget.saturating_sub(started.elapsed());
+        let outcome = if left.is_zero() {
+            Err("skipped: the route's time budget is spent".to_string())
+        } else {
+            tokio::time::timeout(left, read(*reader))
+                .await
+                .unwrap_or_else(|_| Err(format!("timed out with {}s left", left.as_secs())))
+        };
+        match outcome {
+            Ok(page) => return (Some(page), failures),
+            Err(error) => {
+                let next = chain
+                    .readers
+                    .get(i + 1)
+                    .map_or("the index copy", |r| r.name());
+                tracing::warn!("reddit: {} failed ({error}); trying {next}", reader.name());
+                failures.push(ReaderFailure {
+                    reader: reader.name().to_string(),
+                    error,
+                });
+            }
+        }
+    }
+    (None, failures)
+}
+
+fn failures_json(failures: &[ReaderFailure]) -> serde_json::Value {
+    json!(failures
+        .iter()
+        .map(|f| json!({"reader": f.reader, "error": f.error}))
+        .collect::<Vec<_>>())
+}
+
+/// A wall worth another try: it comes and goes with Reddit's bot detection.
+fn is_block(wall: Wall) -> bool {
+    matches!(wall, Wall::Bot | Wall::Login)
+}
+
+/// The first top-level heading.
+fn markdown_title(markdown: &str) -> String {
+    markdown
+        .lines()
+        .find_map(|l| l.strip_prefix("# "))
+        .unwrap_or_default()
+        .trim()
+        .to_string()
 }
 
 fn set_extra(r: &mut SearchResult, key: &str, value: serde_json::Value) {
@@ -348,24 +570,59 @@ fn set_extra(r: &mut SearchResult, key: &str, value: serde_json::Value) {
     }
 }
 
-/// A Jina-rendered page as a Reddit result. Collapsed replies ("More
-/// replies") are not expanded, so it is not the complete comment tree.
-fn live_result(thread: &ThreadRef, page: SearchResult) -> SearchResult {
+/// A live render as a Reddit result. Collapsed replies are not expanded (Kagi
+/// showed 92 comments where the archive holds 118), so it is not the complete
+/// comment tree. The text is the thread's own words.
+fn live_result(thread: &ThreadRef, title: String, text: String, via: &str) -> SearchResult {
     let mut extra = json!({
         "post_id": thread.id,
-        "retrieved_via": "jina_reader",
+        "retrieved_via": via,
         "copy": "live_render",
         "complete": false,
+        "verbatim": true,
     });
     if let Some(sub) = &thread.subreddit {
         extra["subreddit"] = json!(sub);
     }
     SearchResult {
-        title: page.title,
+        title,
         url: thread.canonical_url(),
-        snippet: page.snippet,
+        snippet: text,
         source: Reddit::NAME.to_string(),
         published: None,
+        image_url: None,
+        extra: Some(extra),
+    }
+}
+
+/// An archived thread as a Reddit result. The maintainer puts comment coverage
+/// at 90-95%, and the words are as captured.
+fn archive_result(thread: &ThreadRef, archived: arctic_shift::Thread) -> SearchResult {
+    let subreddit = thread.subreddit.clone().or(archived.subreddit);
+    let canonical = ThreadRef {
+        subreddit: subreddit.clone(),
+        ..thread.clone()
+    };
+    let mut extra = json!({
+        "post_id": thread.id,
+        "retrieved_via": arctic_shift::SOURCE,
+        "copy": "archive",
+        "complete": false,
+        "verbatim": true,
+        "deleted_later_count": archived.deleted_later,
+    });
+    if let Some(sub) = subreddit {
+        extra["subreddit"] = json!(sub);
+    }
+    if let Some(captured) = archived.captured_at {
+        extra["captured_at"] = json!(captured);
+    }
+    SearchResult {
+        title: archived.title,
+        url: canonical.canonical_url(),
+        snippet: archived.markdown,
+        source: Reddit::NAME.to_string(),
+        published: archived.published,
         image_url: None,
         extra: Some(extra),
     }
@@ -379,8 +636,18 @@ fn no_route(message: &str) -> SearchError {
     }
 }
 
-/// Keep the live render's failure in the error when the index fails too.
-fn with_live_error(e: SearchError, live_error: &str) -> SearchError {
+/// Keep every reader's failure in the error when the index fails too. An error
+/// that carries no message of its own is rebuilt with the same code and
+/// category, so a missing Perplexity key still reads as an auth problem.
+fn with_reader_errors(e: SearchError, failures: &[ReaderFailure]) -> SearchError {
+    if failures.is_empty() {
+        return e;
+    }
+    let tried = failures
+        .iter()
+        .map(|f| format!("{}: {}", f.reader, f.error))
+        .collect::<Vec<_>>()
+        .join("; ");
     match e {
         SearchError::Blocked {
             provider,
@@ -389,9 +656,22 @@ fn with_live_error(e: SearchError, live_error: &str) -> SearchError {
         } => SearchError::Blocked {
             provider,
             code,
-            message: format!("{message} (live render: {live_error})"),
+            message: format!("{message} (readers tried: {tried})"),
         },
-        other => other,
+        other => {
+            let status = match other.category() {
+                FailureCategory::Auth => Some(401),
+                FailureCategory::RateLimit => Some(429),
+                FailureCategory::Timeout => Some(408),
+                _ => other.http_status(),
+            };
+            SearchError::Api {
+                provider: Reddit::NAME,
+                code: other.error_code(),
+                message: format!("{other} (readers tried: {tried})"),
+                status,
+            }
+        }
     }
 }
 
@@ -444,6 +724,9 @@ fn pick_thread_copy(
         "retrieved_via": perplexity::INDEX_SOURCE,
         "copy": "search_index",
         "complete": false,
+        // The index rewrites what it holds: sampled phrases rarely match the
+        // thread, so this is a paraphrase and not to be quoted.
+        "verbatim": false,
     });
     if let Some(sub) = subreddit {
         extra["subreddit"] = json!(sub);
@@ -628,29 +911,155 @@ mod tests {
         let extra = copy.extra.unwrap();
         assert_eq!(extra["copy"], "search_index");
         assert_eq!(extra["complete"], false);
+        assert_eq!(extra["verbatim"], false);
         assert_eq!(extra["retrieved_via"], "perplexity_search");
         assert_eq!(extra["subreddit"], "rust");
         assert_eq!(extra["index_last_updated"], "2025-11-03");
     }
 
+    fn chain(readers: &[Reader]) -> ReaderChain {
+        ReaderChain {
+            readers: readers.to_vec(),
+            unknown: Vec::new(),
+            hint: false,
+        }
+    }
+
     #[test]
     fn reader_config_values() {
-        assert_eq!(Reader::from_config(""), Reader::Index { hint: true });
-        assert_eq!(Reader::from_config("  "), Reader::Index { hint: true });
-        assert_eq!(Reader::from_config("index"), Reader::Index { hint: false });
-        assert_eq!(Reader::from_config("jina"), Reader::Jina);
+        let hinted = ReaderChain::from_config("");
+        assert!(hinted.readers.is_empty() && hinted.hint);
+        assert!(ReaderChain::from_config("  ").hint);
+        let index = ReaderChain::from_config("index");
+        assert!(index.readers.is_empty() && !index.hint);
+        assert_eq!(ReaderChain::from_config("jina").readers, vec![Reader::Jina]);
+        assert_eq!(
+            ReaderChain::from_config("kagi, arctic_shift,index").readers,
+            vec![Reader::Kagi, Reader::ArcticShift]
+        );
+        let bad = ReaderChain::from_config("bing,kagi");
+        assert_eq!(bad.readers, vec![Reader::Kagi]);
+        assert_eq!(bad.unknown, vec!["bing".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn the_first_reader_to_succeed_wins_and_keeps_earlier_failures() {
+        let c = chain(&[Reader::Kagi, Reader::ArcticShift, Reader::Jina]);
+        let tried = Mutex::new(Vec::new());
+        let (page, failures) = run_readers(&c, Instant::now(), READER_BUDGET, |reader| {
+            tried.lock().unwrap().push(reader);
+            async move {
+                match reader {
+                    Reader::Kagi => Err("blocked".to_string()),
+                    _ => Ok(result("https://a.test", "page")),
+                }
+            }
+        })
+        .await;
+        assert_eq!(page.unwrap().snippet, "page");
+        assert_eq!(
+            *tried.lock().unwrap(),
+            vec![Reader::Kagi, Reader::ArcticShift]
+        );
+        assert_eq!(
+            failures,
+            vec![ReaderFailure {
+                reader: "kagi".into(),
+                error: "blocked".into()
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn every_failure_is_kept_when_no_reader_succeeds() {
+        let mut c = chain(&[Reader::Kagi, Reader::ArcticShift]);
+        c.unknown.push("bing".into());
+        let (page, failures) =
+            run_readers(&c, Instant::now(), READER_BUDGET, |reader| async move {
+                Err(format!("{} failed", reader.name()))
+            })
+            .await;
+        assert!(page.is_none());
+        let names: Vec<_> = failures.iter().map(|f| f.reader.as_str()).collect();
+        assert_eq!(names, ["bing", "kagi", "arctic_shift"]);
+        assert_eq!(failures[2].error, "arctic_shift failed");
+    }
+
+    #[tokio::test]
+    async fn a_slow_reader_is_cut_off_with_a_reason_and_later_ones_are_skipped() {
+        let c = chain(&[Reader::Kagi, Reader::ArcticShift]);
+        let (page, failures) =
+            run_readers(&c, Instant::now(), Duration::from_millis(20), |_| async {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                Ok(result("https://a.test", "late"))
+            })
+            .await;
+        assert!(page.is_none());
+        assert!(failures[0].error.contains("timed out"), "{failures:?}");
+        assert!(failures[1].error.contains("skipped"), "{failures:?}");
+    }
+
+    #[test]
+    fn budgets_stay_inside_the_engine_limit() {
+        assert!(ROUTE_BUDGET < Duration::from_secs(60));
+        assert!(READER_BUDGET >= JINA_DEADLINE && READER_BUDGET < ROUTE_BUDGET);
     }
 
     #[test]
     fn live_result_is_labelled_as_a_render() {
         let t = thread("https://old.reddit.com/r/rust/comments/i5hppj/smol/").unwrap();
-        let r = live_result(&t, result("https://r.jina.ai/x", "# Title\nComments"));
+        let r = live_result(&t, "T".into(), "# T\nComments".into(), "kagi_extract");
         assert_eq!(r.url, "https://www.reddit.com/r/rust/comments/i5hppj/");
         assert_eq!(r.source, "reddit");
         let extra = r.extra.unwrap();
         assert_eq!(extra["copy"], "live_render");
-        assert_eq!(extra["retrieved_via"], "jina_reader");
+        assert_eq!(extra["retrieved_via"], "kagi_extract");
         assert_eq!(extra["subreddit"], "rust");
+        assert_eq!(extra["complete"], false);
+        assert_eq!(extra["verbatim"], true);
+    }
+
+    #[test]
+    fn archive_result_is_labelled_and_fills_in_the_subreddit() {
+        let t = thread("https://redd.it/1vvsc9y").unwrap();
+        let r = archive_result(
+            &t,
+            arctic_shift::Thread {
+                title: "T".into(),
+                markdown: "# T".into(),
+                subreddit: Some("gpu".into()),
+                published: Some("2026-01-01T00:00:00Z".into()),
+                captured_at: Some("2026-01-02T00:00:00Z".into()),
+                deleted_later: 2,
+            },
+        );
+        assert_eq!(r.url, "https://www.reddit.com/r/gpu/comments/1vvsc9y/");
+        let extra = r.extra.unwrap();
+        assert_eq!(extra["copy"], "archive");
+        assert_eq!(extra["retrieved_via"], "arctic_shift");
+        assert_eq!(extra["complete"], false);
+        assert_eq!(extra["verbatim"], true);
+        assert_eq!(extra["captured_at"], "2026-01-02T00:00:00Z");
+        assert_eq!(extra["deleted_later_count"], 2);
+    }
+
+    #[test]
+    fn title_is_the_first_top_level_heading() {
+        assert_eq!(markdown_title("intro\n# RTX pro\n\n## Comments"), "RTX pro");
+        assert_eq!(markdown_title("no heading"), "");
+    }
+
+    #[test]
+    fn block_pages_from_kagi_are_walls_and_threads_are_not() {
+        // The page Kagi returned on the first try at 1v56gxo.
+        let page = "You've been blocked by network security.\n\nTo continue, log in to your \
+                    Reddit account or use your developer token\n\nIf you think you've been \
+                    blocked by mistake, file a ticket below and we'll look into it.\n\n\
+                    [Log in](https://www.reddit.com/login/) [File a ticket](https://x.test/n)";
+        assert!(walls::classify_reader_text(page).is_some_and(is_block));
+        let thread = "# RTX\n\nr/gpu · u/a\n\nBought a card and it failed within a month.\n\n\
+                      ## Comments\n\n- **u/b**\n  Same here, the PSU is fine.\n";
+        assert_eq!(walls::classify_reader_text(thread), None);
     }
 
     #[test]
@@ -694,12 +1103,40 @@ mod tests {
     }
 
     #[test]
-    fn live_failure_stays_in_the_final_error() {
-        let e = with_live_error(no_route("no copy"), "Jina Reader returned a bot_wall");
+    fn reader_failures_stay_in_the_final_error() {
+        let failures = [
+            ReaderFailure {
+                reader: "kagi".into(),
+                error: "no Kagi API key".into(),
+            },
+            ReaderFailure {
+                reader: "arctic_shift".into(),
+                error: "HTTP 500".into(),
+            },
+        ];
+        let e = with_reader_errors(no_route("no copy"), &failures);
         assert_eq!(e.error_code(), "no_sanctioned_route");
         assert_eq!(
             e.to_string(),
-            "reddit: no copy (live render: Jina Reader returned a bot_wall)"
+            "reddit: no copy (readers tried: kagi: no Kagi API key; arctic_shift: HTTP 500)"
         );
+    }
+
+    #[test]
+    fn a_missing_index_key_keeps_its_category_and_the_reader_failures() {
+        let failures = [ReaderFailure {
+            reader: "kagi".into(),
+            error: "blocked".into(),
+        }];
+        let missing = SearchError::AuthMissing {
+            provider: "perplexity",
+        };
+        let e = with_reader_errors(missing, &failures);
+        assert_eq!(e.error_code(), "auth_missing");
+        assert_eq!(e.category(), FailureCategory::Auth);
+        assert!(e.to_string().contains("kagi: blocked"), "{e}");
+        assert!(e.to_string().contains("perplexity"), "{e}");
+        let untouched = with_reader_errors(no_route("no copy"), &[]);
+        assert_eq!(untouched.to_string(), "reddit: no copy");
     }
 }

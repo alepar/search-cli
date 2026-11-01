@@ -25,7 +25,7 @@ use clap::{Parser, Subcommand};
           browserless Cloud browser for Cloudflare/JS-heavy pages\n  \
           stealth    Local anti-bot scraper (no API key; opt-in build feature)\n  \
           xai        Only real-time X/Twitter search (Grok agentic)\n  \
-          reddit     Reddit thread reader for extract (indexed copies only)\n\n\
+          reddit     Reddit thread reader for extract (index copy; readers via reddit.reader)\n\n\
         EXAMPLES:\n  \
           search \"rust error handling\"                    # general web search\n  \
           search search -q \"CRISPR\" -m academic           # academic papers\n  \

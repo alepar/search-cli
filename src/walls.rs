@@ -188,14 +188,17 @@ fn body_opening(content: &str) -> String {
         .collect()
 }
 
-/// Lines ahead of the body: the title and the index's metadata. Its comments
-/// heading is not one, because what follows it is a commenter's words.
+/// Lines ahead of the body: the title and the metadata from an index or a
+/// reader (Kagi's `r/sub · u/author` byline). The index's comments heading is
+/// not one, because what follows it is a commenter's words.
 fn is_preamble(line: &str) -> bool {
     let bold = line.len() > 4 && line.starts_with("**") && line.ends_with("**");
+    let byline = line.starts_with("r/") && line.contains(" · u/");
     line.is_empty()
         || matches!(line, "..." | "---")
         || (line.starts_with('#') && !line.eq_ignore_ascii_case("### comments"))
         || bold
+        || byline
         || line.starts_with("author: ")
 }
 
@@ -407,6 +410,7 @@ mod tests {
             "# Title\n\nBased on the provided content, the author bought a card.",
             "author: someone\n### Title\nAs an AI language model, I cannot read this page.",
             "As an AI, I can't open links.",
+            "# Title\n\nr/gpu · u/someone\n\nHere's a rewritten version of the post:\n\nI bought it.",
             "I'm sorry, but I can't assist with that.",
             "I apologize, but I cannot access that URL. Please paste the text here.",
             "I can\u{2019}t browse the web, but here\u{2019}s a summary of the likely content.",

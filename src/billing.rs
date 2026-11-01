@@ -354,11 +354,10 @@ fn estimates_by_month(entries: &[Value]) -> BTreeMap<String, BTreeMap<String, f6
             .flatten()
             .filter_map(Value::as_str)
         {
-            let base = stats::base_provider(p);
-            *out.entry(base.to_string())
+            *out.entry(stats::base_provider(p).to_string())
                 .or_default()
                 .entry(month.clone())
-                .or_default() += stats::estimated_cost_per_call(base);
+                .or_default() += stats::estimated_cost_per_call(p);
         }
     }
     for months in out.values_mut() {
@@ -796,6 +795,14 @@ mod tests {
         let per_call = stats::estimated_cost_per_call("brave");
         assert!((brave["2026-09"] - 2.0 * per_call).abs() < 1e-12);
         assert!((brave["2026-10"] - per_call).abs() < 1e-12);
+    }
+
+    #[test]
+    fn estimates_price_kagi_extract_as_a_page_under_kagi() {
+        let ts = dates::days_from_civil(2026, 11, 1) as u64 * 86400;
+        let entries = vec![json!({"ts": ts, "providers_queried": ["reddit", "kagi_extract"]})];
+        let est = estimates_by_month(&entries);
+        assert_eq!(est["kagi"]["2026-11"], 0.004);
     }
 
     #[test]

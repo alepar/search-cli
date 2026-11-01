@@ -8,6 +8,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const SEARCH_URL: &str = "https://kagi.com/api/v1/search";
+const EXTRACT_URL: &str = "https://kagi.com/api/v1/extract";
+/// Logged per Extract call, and the name `stats` prices it under: pages are
+/// billed separately from searches.
+pub const EXTRACT_SOURCE: &str = "kagi_extract";
+/// The API clamps `timeout` to 0.5-10 s.
+const EXTRACT_TIMEOUT_SECS: u64 = 10;
 
 pub struct Kagi {
     ctx: Arc<AppContext>,
@@ -52,6 +58,85 @@ impl Kagi {
 
         Ok(map_results(resp, workflow))
     }
+
+    /// One page as Markdown through Kagi Extract, a live fetch rather than a
+    /// cache. No retry: the caller decides what a bad page is worth. A block
+    /// page can come back as a 200 with Markdown, so check what this returns.
+    pub async fn extract_page(&self, url: &str, deadline: Duration) -> Result<String, SearchError> {
+        let key = self.api_key();
+        if key.is_empty() {
+            return Err(SearchError::AuthMissing { provider: "kagi" });
+        }
+        let body = json!({
+            "pages": [{"url": url}],
+            "timeout": EXTRACT_TIMEOUT_SECS,
+            "format": "json",
+        });
+        let resp = self
+            .ctx
+            .client
+            .post(EXTRACT_URL)
+            .bearer_auth(&key)
+            .timeout(deadline)
+            .json(&body)
+            .send()
+            .await?;
+        let resp = super::ok_or_api_error(resp, "kagi")
+            .await
+            .map_err(normalize_error)?;
+        extract_markdown(resp.json().await?)
+    }
+}
+
+/// The page's Markdown. Per-page failures arrive in a 200 next to an empty
+/// `data`, under `errors`; the spec's error envelope calls the field `error`.
+fn extract_markdown(resp: ExtractResponse) -> Result<String, SearchError> {
+    let page = resp
+        .data
+        .into_iter()
+        .flatten()
+        .find_map(|p| p.markdown.filter(|m| !m.trim().is_empty()));
+    if let Some(markdown) = page {
+        return Ok(markdown);
+    }
+    let detail: Vec<String> = resp
+        .errors
+        .into_iter()
+        .flatten()
+        .map(|e| match e.message {
+            Some(message) => format!("{}: {message}", e.code),
+            None => e.code,
+        })
+        .collect();
+    Err(SearchError::Api {
+        provider: "kagi",
+        code: "api_error",
+        message: if detail.is_empty() {
+            "Extract returned no page".to_string()
+        } else {
+            format!("Extract failed: {}", detail.join("; "))
+        },
+        status: None,
+    })
+}
+
+#[derive(Deserialize)]
+struct ExtractResponse {
+    data: Option<Vec<ExtractPage>>,
+    #[serde(alias = "error")]
+    errors: Option<Vec<ExtractError>>,
+}
+
+#[derive(Deserialize)]
+struct ExtractPage {
+    markdown: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ExtractError {
+    #[serde(default)]
+    code: String,
+    message: Option<String>,
 }
 
 /// Which Kagi v1 workflow to run. Each workflow returns its results under a
@@ -338,6 +423,41 @@ mod tests {
         assert_eq!(body["limit"], 1);
         let body = build_request("q", 5000, &SearchOpts::default(), Workflow::Search);
         assert_eq!(body["limit"], 1024);
+    }
+
+    fn extract(json: &str) -> Result<String, SearchError> {
+        extract_markdown(serde_json::from_str(json).expect("fixture parses"))
+    }
+
+    #[test]
+    fn extract_returns_the_page_markdown() {
+        let ok = r##"{"meta": {"trace": "t", "ms": 4030},
+            "data": [{"url": "https://example.com/", "markdown": "# Title\n\nText"}]}"##;
+        assert_eq!(extract(ok).unwrap(), "# Title\n\nText");
+    }
+
+    #[test]
+    fn extract_page_errors_keep_their_detail() {
+        let per_page = r#"{"meta": {}, "data": [],
+            "errors": [{"code": "extract.invalid_url", "url": "https://help.kagi.com/x",
+                        "message": "URL must be a valid HTTPS URL", "location": "pages[0].url"}]}"#;
+        let spec_shape = per_page.replace("\"errors\"", "\"error\"");
+        for body in [per_page, &spec_shape] {
+            let err = extract(body).unwrap_err().to_string();
+            assert!(err.contains("extract.invalid_url"), "{err}");
+            assert!(err.contains("valid HTTPS URL"), "{err}");
+        }
+    }
+
+    #[test]
+    fn extract_with_nothing_usable_is_an_error() {
+        for body in [
+            r#"{"meta": {}, "data": []}"#,
+            r#"{"meta": {}, "data": null}"#,
+            r#"{"meta": {}, "data": [{"url": "https://a.test/", "markdown": "  "}]}"#,
+        ] {
+            assert!(extract(body).is_err(), "{body}");
+        }
     }
 
     fn api(status: u16, message: &str) -> SearchError {

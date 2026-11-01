@@ -1,3 +1,4 @@
+pub mod arctic_shift;
 pub mod brave;
 pub mod browserless;
 pub mod exa;

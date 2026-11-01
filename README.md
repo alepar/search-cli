@@ -155,27 +155,53 @@ Both Reddit paths read search indexes that already hold Reddit pages:
   not used because it no longer indexes reddit.com.
 - `-m extract` on a reddit.com or redd.it thread URL returns the thread's
   indexed copy from the Perplexity Search API, found by post ID, with source
-  `reddit` and `extra.copy: "search_index"`, `extra.complete: false` and
-  `extra.index_last_updated`. It is query-relevant excerpts of the post and
-  comments, not the full live comment tree, and new threads appear only after
-  the index catches up. When no index holds the thread, or the URL is not a
+  `reddit` and `extra.copy: "search_index"`, `extra.complete: false`,
+  `extra.verbatim: false` and `extra.index_last_updated`. It is query-relevant
+  excerpts of the post and comments, not the full live comment tree, and new
+  threads appear only after the index catches up. Perplexity's text is
+  rewritten rather than quoted, so do not attribute it to a Redditor. When no index holds the thread, or the URL is not a
   thread (a subreddit, user page or share link), the result is an error with
   category `blocked` and code `no_sanctioned_route`, and the generic scraper
   chain does not run. An index copy that opens with a model's note (a
   paraphrase, an apology, "unable to access") is rejected: the route tries the
   index's other candidates, then fails with category `blocked` and code
   `model_text`. `-p` without `reddit` skips this route.
-- Full live threads are an opt-in: `search config set reddit.reader jina`
-  (or `SEARCH_REDDIT_READER=jina`). Extract then asks Jina Reader to render the
-  thread (the post and every visible comment, collapsed replies excepted,
-  about 10-40 s), labelled `extra.copy: "live_render"`, and falls back to the
-  index copy if Jina fails or returns a wall (`extra.live_render_error` says
-  why). This is not a sanctioned route: Reddit's terms bar unauthorised
-  automated access, Jina's terms make the customer responsible for the
-  sources it reads, and Reddit can block Jina at any time. Every use logs a
-  warning. While `reddit.reader` is unset, index copies carry
-  `extra.reader_hint` offering the opt-in; `search config set reddit.reader
-  index` keeps index copies and removes the hint.
+- Full threads are an opt-in. `reddit.reader` (or `SEARCH_REDDIT_READER`) is
+  an ordered, comma-separated chain tried before the index copy, which always
+  runs last:
+
+  ```
+  search config set reddit.reader kagi,arctic_shift
+  ```
+
+  | Reader | What it does | Labels | Needs |
+  |---|---|---|---|
+  | `jina` | Jina Reader renders the live thread, about 10-40 s | `copy: "live_render"`, `retrieved_via: "jina_reader"` | Optional key |
+  | `kagi` | Kagi Extract fetches the live thread, a few seconds; Reddit's block page is retried up to twice | `copy: "live_render"`, `retrieved_via: "kagi_extract"` | Kagi key, $4 per 1,000 pages |
+  | `arctic_shift` | The Arctic Shift archive, by post ID: post plus nested comments, crosspost text from the parent record | `copy: "archive"`, `retrieved_via: "arctic_shift"`, `captured_at`, `deleted_later_count` | Nothing, free |
+
+  All three carry `extra.verbatim: true` and `extra.complete: false`: renders
+  skip collapsed replies, and the archive holds 90-95% of comments by its
+  maintainer's estimate. The archive also keeps text deleted from Reddit
+  after capture; this route withholds it, leaving `[deleted later]` in its
+  place. Arctic Shift is a free service with no uptime promise, and it collects
+  through the Data API that Reddit closes in 2027.
+
+  A reader that fails, or returns a wall or model-written text, passes to the
+  next one, and its reason stays in `extra.reader_errors`
+  (`[{reader, error}]`), or in the final error when the index fails too. The
+  route stops itself inside 58 s, so a slow chain skips readers with a reason
+  rather than losing them. Each Kagi attempt shows in
+  `metadata.providers_queried` as `kagi_extract`, priced per page in `search
+  stats` and `search usage`.
+
+  None of this is a sanctioned route. Reddit's terms bar unauthorised automated
+  access, Jina's terms make the customer responsible for the sources it reads,
+  no agreement between Arctic Shift and Reddit is known, and Reddit can block
+  the live readers at any time. Every use logs a warning. While `reddit.reader` is
+  unset, index copies carry `extra.reader_hint` offering the opt-in;
+  `search config set reddit.reader index` keeps index copies and removes the
+  hint.
 
 Both need a Perplexity key; `-m reddit` also uses whichever of the other four
 engines are configured. Terms posture: these are ordinary calls to search

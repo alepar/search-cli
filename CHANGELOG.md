@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased
+
+Features:
+- `reddit.reader` is now an ordered, comma-separated chain, for example
+  `search config set reddit.reader kagi,arctic_shift`, always ending in the
+  Perplexity index copy. `index` and `jina` mean what they did. `config set`
+  validates the names and `config show` prints the chain.
+- New reader `kagi`: Kagi Extract renders the live thread
+  (`extra.copy: "live_render"`, `retrieved_via: "kagi_extract"`). Reddit's
+  block page can come back as a 200, so walls are detected and retried up to
+  twice. Needs a Kagi key.
+- New reader `arctic_shift`: the Arctic Shift archive, by post ID, rendered as
+  nested Markdown (`extra.copy: "archive"`, `captured_at`, crosspost text from
+  the parent record). Text the archive flags as deleted later is withheld and
+  replaced by `[deleted later]`, counted in `extra.deleted_later_count`.
+- Reddit extract results say whether their text can be quoted: `extra.verbatim`
+  is `true` for the readers and `false` for the Perplexity index copy, which
+  rewrites what it holds.
+- Kagi Extract spend is estimated at $4 per 1,000 pages in `search stats` and
+  `search usage`, under `kagi`. Each attempt is listed as `kagi_extract` in
+  `metadata.providers_queried`.
+
+Changes:
+- `extra.live_render_error` is replaced by `extra.reader_errors`, a list of
+  `{reader, error}` for every reader that failed before the one that answered.
+  The final error names them all, whatever the index's own failure was.
+- The Reddit route stops itself at 58 s, so a slow chain reports its failures
+  instead of being cut off by the engine's 60 s limit.
+
+Fixes:
+- The model-text check skips the `r/sub · u/author` byline, so a reader's note
+  below it is caught.
+
 ## 0.13.1 — 2026-11-01
 
 Fixes:

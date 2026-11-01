@@ -584,6 +584,7 @@ pub async fn execute_special(
                     &mut provider_failures,
                     &mut provider_results,
                 );
+                providers_queried.extend(route.billed_calls());
                 run_chain = results.is_empty() && route.fallback_to_chain();
             }
             if run_chain {

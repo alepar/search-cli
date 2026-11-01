@@ -21,10 +21,13 @@ pub struct AppConfig {
     pub reddit: RedditConfig,
 }
 
-/// `[reddit]` section. `reader` picks how extract reads a Reddit thread:
-/// `index` (the search index's copy, the default behaviour) or `jina` (the
-/// full live thread rendered by Jina Reader, falling back to the index).
-/// Unset behaves like `index` but tells the caller the opt-in exists.
+/// `[reddit]` section. `reader` is the comma-separated chain extract tries on
+/// a Reddit thread, in order: `jina` and `kagi` render the live thread,
+/// `arctic_shift` reads an archive. The search index's copy (`index`) is always
+/// the last step, so `kagi,arctic_shift` means Kagi, then Arctic Shift, then
+/// the index. A string rather than a TOML array, so an older binary still
+/// loads the file. Unset behaves like `index` but tells the caller the opt-in
+/// exists.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RedditConfig {
     #[serde(default)]
@@ -202,10 +205,59 @@ pub const METASEARCH_KEYS: &[&str] = &["token", "email", "url"];
 /// Valid field names for `config set xai.<name>`.
 pub const XAI_KEYS: &[&str] = &["model"];
 
-/// Valid field names for `config set reddit.<name>`, and the values `reader`
+/// Valid field names for `config set reddit.<name>`, and the names `reader`
 /// accepts.
 pub const REDDIT_KEYS: &[&str] = &["reader"];
-pub const REDDIT_READERS: &[&str] = &["index", "jina"];
+pub const REDDIT_READERS: &[&str] = &["index", "jina", "kagi", "arctic_shift"];
+
+/// The names in a `reddit.reader` value, in order.
+pub fn reddit_reader_names(value: &str) -> Vec<&str> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+/// Validate a `reddit.reader` value and return its canonical form.
+pub fn normalize_reddit_reader(value: &str) -> Result<String, SearchError> {
+    let names = reddit_reader_names(value);
+    let invalid =
+        |why: String| SearchError::Config(format!("Invalid reddit.reader '{value}': {why}"));
+    if names.is_empty() {
+        return Err(invalid(format!(
+            "name at least one of {}",
+            REDDIT_READERS.join(", ")
+        )));
+    }
+    for (i, name) in names.iter().enumerate() {
+        if !REDDIT_READERS.contains(name) {
+            return Err(invalid(format!(
+                "unknown reader '{name}'. Valid: {}",
+                REDDIT_READERS.join(", ")
+            )));
+        }
+        if names[..i].contains(name) {
+            return Err(invalid(format!("'{name}' is listed twice")));
+        }
+        if *name == "index" && i + 1 != names.len() {
+            return Err(invalid("'index' is always the last step".to_string()));
+        }
+    }
+    Ok(names.join(","))
+}
+
+/// `reddit.reader` as `config show` prints it: the chain as it will run.
+pub fn reddit_chain_display(value: &str) -> String {
+    let mut names = reddit_reader_names(value);
+    if names.is_empty() {
+        return "(not set: index)".to_string();
+    }
+    if names.last() != Some(&"index") {
+        names.push("index");
+    }
+    names.join(" -> ")
+}
 
 pub fn mask_key(key: &str) -> String {
     // Char-based: byte-slicing (`&key[..2]`) panics on multi-byte UTF-8 and
@@ -320,10 +372,7 @@ pub fn config_show(config: &AppConfig) {
     }
 
     println!();
-    let reader = match config.reddit.reader.trim() {
-        "" => "(not set: index)",
-        r => r,
-    };
+    let reader = reddit_chain_display(&config.reddit.reader);
     if c {
         println!("  {}", "[reddit]".bold());
         println!("    {:<10} {}", "reader".white(), reader.cyan());
@@ -423,13 +472,7 @@ pub fn config_set(key: &str, value: &str) -> Result<(), crate::errors::SearchErr
                             REDDIT_KEYS.join(", ")
                         )));
                     }
-                    if !REDDIT_READERS.contains(&value) {
-                        return Err(SearchError::Config(format!(
-                            "Invalid reddit.reader '{value}'. Valid: {}",
-                            REDDIT_READERS.join(", ")
-                        )));
-                    }
-                    toml::Value::String(value.to_string())
+                    toml::Value::String(normalize_reddit_reader(value)?)
                 }
                 other => {
                     return Err(SearchError::Config(format!(
@@ -700,7 +743,47 @@ pub fn config_check(config: &AppConfig) {
 
 #[cfg(test)]
 mod tests {
-    use super::{mask_key, parse_setting, write_config_atomic};
+    use super::{
+        mask_key, normalize_reddit_reader, parse_setting, reddit_chain_display, write_config_atomic,
+    };
+
+    #[test]
+    fn reddit_reader_values_normalize() {
+        for (input, canonical) in [
+            ("index", "index"),
+            ("jina", "jina"),
+            ("kagi,arctic_shift", "kagi,arctic_shift"),
+            (" kagi , arctic_shift ", "kagi,arctic_shift"),
+            ("jina,kagi,index", "jina,kagi,index"),
+        ] {
+            assert_eq!(normalize_reddit_reader(input).unwrap(), canonical);
+        }
+    }
+
+    #[test]
+    fn reddit_reader_rejects_bad_chains() {
+        for (input, why) in [
+            ("", "at least one"),
+            (" , ", "at least one"),
+            ("kagi,bing", "unknown reader 'bing'"),
+            ("kagi,kagi", "listed twice"),
+            ("index,kagi", "last step"),
+        ] {
+            let err = normalize_reddit_reader(input).unwrap_err().to_string();
+            assert!(err.contains(why), "{input}: {err}");
+        }
+    }
+
+    #[test]
+    fn config_show_prints_the_chain_as_it_runs() {
+        assert_eq!(reddit_chain_display(""), "(not set: index)");
+        assert_eq!(reddit_chain_display("index"), "index");
+        assert_eq!(reddit_chain_display("jina"), "jina -> index");
+        assert_eq!(
+            reddit_chain_display("kagi,arctic_shift"),
+            "kagi -> arctic_shift -> index"
+        );
+    }
 
     #[test]
     fn mask_key_never_panics_on_multibyte() {
