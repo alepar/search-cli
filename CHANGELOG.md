@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.14.1 — 2026-11-03
+
+Fixes:
+- Cloudflare's "We must verify your session" interstitial is now detected as a
+  bot wall. It used to come back as a successful extract and was cached.
+
 ## 0.14.0 — 2026-11-01
 
 Features:
