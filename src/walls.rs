@@ -71,6 +71,7 @@ const BOT_MARKERS: &[&str] = &[
     "enable javascript and cookies to continue",
     "cf-browser-verification",
     "attention required! | cloudflare",
+    "verification successful. waiting for",
     // DataDome
     "captcha-delivery.com",
     // HUMAN / PerimeterX
@@ -333,6 +334,16 @@ mod tests {
             prose(3)
         );
         assert_eq!(classify_content(&cf), Some(Wall::Bot));
+    }
+
+    #[test]
+    fn cloudflare_session_interstitial_is_a_wall() {
+        // Captured from Jina Reader on crunchbase.com, 2026-11-03.
+        let page = "We must verify your session before you can proceed\n\n\
+            Verification successful. Waiting for www.crunchbase.com to respond\n\n\
+            Need help? [Contact our support team](mailto:support@crunchbase.com).\n\n\
+            Ray ID: `a54ddaa2fbc16119`";
+        assert_eq!(classify_content(page), Some(Wall::Bot));
     }
 
     #[test]
